@@ -223,7 +223,8 @@ def _refresh_summary(wb):
     totals = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         if row[1]:
-            p = row[1]; h = row[4] or 0
+            p = row[1]
+            h = row[4] or 0
             totals[p] = totals.get(p, {"h": 0, "n": 0})
             totals[p]["h"] += h
             totals[p]["n"] += 1
