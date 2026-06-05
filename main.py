@@ -4,13 +4,119 @@ import time
 import threading
 from datetime import datetime
 import os
+import sys
 import json
+import shutil
+import subprocess
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-EXCEL_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "heures_projet.xlsx")
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects.json")
+INSTALL_DIR   = os.path.join(os.environ.get("LOCALAPPDATA", ""), "TimeTracker")
+INSTALL_EXE   = os.path.join(INSTALL_DIR, "TimeTracker.exe")
+REGISTRY_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+REGISTRY_NAME = "TimeTracker"
+APP_NAME      = "Time Tracker"
+
+def is_frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+def get_app_data_dir() -> str:
+    if is_frozen():
+        os.makedirs(INSTALL_DIR, exist_ok=True)
+        return INSTALL_DIR
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_running_exe() -> str:
+    if is_frozen():
+        return os.path.abspath(sys.executable)
+    return os.path.abspath(__file__)
+
+def paths_equal(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+def _register_startup(exe_path: str) -> None:
+    if os.name != "nt":
+        return
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, REGISTRY_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
+
+def _create_shortcut(lnk_path: str, target: str, work_dir: str) -> None:
+    if os.name != "nt":
+        return
+    os.makedirs(os.path.dirname(lnk_path), exist_ok=True)
+    ps_lnk    = lnk_path.replace("'", "''")
+    ps_target = target.replace("'", "''")
+    ps_work   = work_dir.replace("'", "''")
+    ps_name   = APP_NAME.replace("'", "''")
+    script = (
+        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{ps_lnk}'); "
+        f"$s.TargetPath = '{ps_target}'; "
+        f"$s.WorkingDirectory = '{ps_work}'; "
+        f"$s.Description = '{ps_name}'; "
+        f"$s.Save()"
+    )
+    creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    subprocess.run(
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+        check=False,
+        creationflags=creationflags,
+    )
+
+def _migrate_data(from_dir: str, to_dir: str) -> None:
+    for filename in ("heures_projet.xlsx", "projects.json"):
+        src = os.path.join(from_dir, filename)
+        dst = os.path.join(to_dir, filename)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+
+def ensure_installed() -> None:
+    """Au premier lancement du .exe, installe l'app dans AppData puis relance."""
+    if not is_frozen() or os.name != "nt":
+        return
+
+    os.makedirs(INSTALL_DIR, exist_ok=True)
+    running_exe = get_running_exe()
+
+    if paths_equal(running_exe, INSTALL_EXE):
+        _register_startup(INSTALL_EXE)
+        return
+
+    _migrate_data(os.path.dirname(running_exe), INSTALL_DIR)
+    first_install = not os.path.exists(INSTALL_EXE)
+    shutil.copy2(running_exe, INSTALL_EXE)
+    _register_startup(INSTALL_EXE)
+
+    desktop = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop", f"{APP_NAME}.lnk")
+    start_menu = os.path.join(
+        os.environ.get("APPDATA", ""),
+        "Microsoft", "Windows", "Start Menu", "Programs",
+        f"{APP_NAME}.lnk",
+    )
+    _create_shortcut(desktop, INSTALL_EXE, INSTALL_DIR)
+    _create_shortcut(start_menu, INSTALL_EXE, INSTALL_DIR)
+
+    if first_install:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(
+            APP_NAME,
+            f"Installation terminee.\n\n"
+            f"Dossier : {INSTALL_DIR}\n"
+            f"Raccourci Bureau + Menu Demarrer crees.\n"
+            f"L'app se lancera a chaque demarrage de Windows.",
+            parent=root,
+        )
+        root.destroy()
+
+    creationflags = subprocess.DETACHED_PROCESS if hasattr(subprocess, "DETACHED_PROCESS") else 0
+    subprocess.Popen([INSTALL_EXE], close_fds=True, creationflags=creationflags)
+    sys.exit(0)
+
+APP_DIR     = get_app_data_dir()
+EXCEL_FILE  = os.path.join(APP_DIR, "heures_projet.xlsx")
+CONFIG_FILE = os.path.join(APP_DIR, "projects.json")
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 
@@ -514,6 +620,7 @@ class TimeTrackerApp:
 # ─── ENTRY ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    ensure_installed()
     ensure_excel()
     root = tk.Tk()
     app  = TimeTrackerApp(root)
