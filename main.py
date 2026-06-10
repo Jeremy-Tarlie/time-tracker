@@ -31,7 +31,7 @@ SORT_OPTIONS: list[tuple[str, SortMode]] = [
     ("Date ↓", "date_desc"),
 ]
 SORT_LABELS: dict[SortMode, str] = {mode: label for label, mode in SORT_OPTIONS}
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 INSTALL_DIR   = os.path.join(os.environ.get("LOCALAPPDATA", ""), "TimeTracker")
 INSTALL_EXE   = os.path.join(INSTALL_DIR, "TimeTracker.exe")
@@ -214,142 +214,263 @@ def sort_projects(projects: list[ProjectEntry], mode: SortMode) -> list[ProjectE
         return sorted(projects, key=lambda entry: entry["created"])
     return sorted(projects, key=lambda entry: entry["created"], reverse=True)
 
-def filter_projects(projects: list[ProjectEntry], query: str) -> list[ProjectEntry]:
-    needle = query.strip().casefold()
-    if not needle:
-        return projects
-    return [entry for entry in projects if needle in entry["name"].casefold()]
-
 def project_names(projects: list[ProjectEntry]) -> list[str]:
     return [entry["name"] for entry in projects]
 
-class FilterBar(tk.Frame):
-    """Barre recherche (placeholder + effacer) et tri dans un seul bloc."""
+class SearchableDropdown(tk.Frame):
+    """Select avec recherche integree dans le panneau deroulant."""
 
-    PLACEHOLDER = "Filtrer les projets…"
+    POPUP_LIST_HEIGHT = 8
 
     def __init__(
         self,
         parent: tk.Misc,
-        search_var: tk.StringVar,
-        sort_var: tk.StringVar,
-        on_filter,
-        on_sort,
+        textvariable: tk.StringVar,
         *,
         bg: str,
         field_bg: str,
         border: str,
         muted: str,
         accent: str,
+        highlight: str,
         text: str,
-        sort_width: int = 9,
-        combobox_style: str | None = None,
+        empty_label: str = "Aucun projet",
+        placeholder: str = "Choisir un projet…",
     ) -> None:
         super().__init__(parent, bg=bg)
-        self.search_var = search_var
-        self._on_filter = on_filter
+        self.variable = textvariable
+        self._bg = bg
+        self._field_bg = field_bg
+        self._border = border
         self._muted = muted
         self._accent = accent
-        self._field_bg = field_bg
-        self._text_fg = text
-        self._placeholder_active = False
-        self._updating = False
+        self._highlight = highlight
+        self._text = text
+        self._empty_label = empty_label
+        self._placeholder = placeholder
+        self._items: list[str] = []
+        self._popup: tk.Toplevel | None = None
+        self._listbox: tk.Listbox | None = None
+        self._search_var = tk.StringVar()
+        self._search_trace_id: str | None = None
+        self._click_bind_id: str | None = None
+        self._open = False
+        self._updating_list = False
+        self._outside_click_armed = False
 
         shell = tk.Frame(self, bg=border, padx=1, pady=1)
         shell.pack(fill="x")
-        inner = tk.Frame(shell, bg=field_bg)
-        inner.pack(fill="x")
+        self.trigger = tk.Frame(shell, bg=field_bg, cursor="hand2")
+        self.trigger.pack(fill="x")
 
-        tk.Label(inner, text="⌕", bg=field_bg, fg=muted,
-                 font=("Segoe UI", 11)).pack(side="left", padx=(10, 4))
-
-        self._entry_var = tk.StringVar()
-        self.entry = tk.Entry(
-            inner, textvariable=self._entry_var,
-            font=("Segoe UI", 10), bg=field_bg, fg=muted,
-            relief="flat", bd=0, highlightthickness=0,
+        self.value_label = tk.Label(
+            self.trigger, text="", bg=field_bg, fg=text, anchor="w",
+            font=("Segoe UI", 10), padx=10, pady=8,
         )
-        self.entry.pack(side="left", fill="x", expand=True, ipady=6)
-
-        self.clear_btn = tk.Button(
-            inner, text="×", bg=field_bg, fg=muted, bd=0,
-            font=("Segoe UI", 12), cursor="hand2", padx=4,
-            activebackground=field_bg, activeforeground=accent,
-            command=self.clear,
+        self.value_label.pack(side="left", fill="x", expand=True)
+        caret = tk.Label(
+            self.trigger, text="▼", bg=field_bg, fg=muted,
+            font=("Segoe UI", 8),
         )
-        self.clear_btn.pack(side="right", padx=(0, 2))
+        caret.pack(side="right", padx=(0, 10))
 
-        self._separator = tk.Frame(inner, bg=border, width=1)
-        self._separator.pack(side="right", fill="y", padx=(4, 6), pady=6)
+        for widget in (self.trigger, self.value_label, caret):
+            widget.bind("<Button-1>", self._toggle)
 
-        sort_kwargs: dict[str, object] = {
-            "textvariable": sort_var,
-            "state": "readonly",
-            "values": [label for label, _mode in SORT_OPTIONS],
-            "font": ("Segoe UI", 9),
-            "width": sort_width,
-        }
-        if combobox_style:
-            sort_kwargs["style"] = combobox_style
-        sort_combo = ttk.Combobox(inner, **sort_kwargs)
-        sort_combo.pack(side="right", padx=(0, 8), ipady=2)
-        sort_combo.bind("<<ComboboxSelected>>", on_sort)
+        self.variable.trace_add("write", lambda *_: self._update_display())
+        self._update_display()
 
-        self.entry.bind("<FocusIn>", self._on_focus_in)
-        self.entry.bind("<FocusOut>", self._on_focus_out)
-        self.entry.bind("<KeyPress>", self._on_key_press)
-        self._entry_var.trace_add("write", self._on_text_changed)
-        self._show_placeholder()
+    def _update_display(self) -> None:
+        value = self.variable.get().strip()
+        if value:
+            self.value_label.config(text=value, fg=self._text)
+        else:
+            self.value_label.config(text=self._placeholder, fg=self._muted)
 
-    def _set_entry_text(self, value: str) -> None:
-        self._updating = True
-        self._entry_var.set(value)
-        self._updating = False
+    def set_options(self, options: list[str]) -> None:
+        self._items = list(options)
+        current = self.variable.get()
+        if current and current not in self._items:
+            if self._items:
+                self.variable.set(self._items[0])
+            else:
+                self.variable.set("")
+        elif not current and self._items:
+            self.variable.set(self._items[0])
+        if self._open:
+            self._refresh_list()
 
-    def _show_placeholder(self) -> None:
-        self._placeholder_active = True
-        self._set_entry_text(self.PLACEHOLDER)
-        self.entry.config(fg=self._muted)
+    def close_if_open(self) -> None:
+        if self._open:
+            self._close()
 
-    def _leave_placeholder(self) -> None:
-        if not self._placeholder_active:
+    def _toggle(self, _event: tk.Event | None = None) -> None:
+        if self._open:
+            self._close()
+        else:
+            self._open_popup()
+
+    def _open_popup(self) -> None:
+        if not self._items or self._open:
             return
-        self._placeholder_active = False
-        self._set_entry_text("")
-        self.entry.config(fg=self._text_fg)
 
-    def _on_focus_in(self, _event: tk.Event) -> None:
-        if self._placeholder_active:
-            self._leave_placeholder()
+        self._close()
+        self._popup = tk.Toplevel(self)
+        self._popup.overrideredirect(True)
+        self._popup.configure(bg=self._border)
+        self._popup.attributes("-topmost", True)
 
-    def _on_focus_out(self, _event: tk.Event) -> None:
-        if self._placeholder_active:
+        width = max(self.winfo_width(), 260)
+        popup_height = 44 + self.POPUP_LIST_HEIGHT * 24 + 8
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 2
+        self._popup.geometry(f"{width}x{popup_height}+{x}+{y}")
+
+        container = tk.Frame(self._popup, bg=self._bg, padx=1, pady=1)
+        container.pack(fill="both", expand=True)
+
+        search_wrap = tk.Frame(container, bg=self._field_bg)
+        search_wrap.pack(fill="x")
+        self._search_var.set("")
+        search_entry = tk.Entry(
+            search_wrap, textvariable=self._search_var,
+            font=("Segoe UI", 10), bg=self._field_bg, fg=self._text,
+            relief="flat", bd=0, highlightthickness=1,
+            highlightbackground=self._border, highlightcolor=self._highlight,
+        )
+        search_entry.pack(fill="x", padx=8, pady=8, ipady=3)
+        search_entry.bind("<Escape>", lambda _event: self._close())
+        search_entry.bind("<Return>", self._select_first)
+        search_entry.bind("<Down>", lambda _event: self._focus_list())
+
+        list_shell = tk.Frame(container, bg=self._border, padx=1)
+        list_shell.pack(fill="both", expand=True, pady=(0, 1))
+        list_frame = tk.Frame(list_shell, bg=self._bg)
+        list_frame.pack(fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical")
+        self._listbox = tk.Listbox(
+            list_frame, yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 10), bg=self._bg, fg=self._text,
+            selectbackground=self._highlight, selectforeground="white",
+            activestyle="none", relief="flat", bd=0,
+            highlightthickness=0, height=self.POPUP_LIST_HEIGHT,
+        )
+        scrollbar.config(command=self._listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        self._listbox.pack(side="left", fill="both", expand=True)
+
+        self._listbox.bind("<Double-Button-1>", self._on_list_select)
+        self._listbox.bind("<Return>", self._on_list_select)
+        self._listbox.bind("<Escape>", lambda _event: self._close())
+        self._search_trace_id = self._search_var.trace_add(
+            "write", lambda *_: self._refresh_list(),
+        )
+
+        self._open = True
+        self._outside_click_armed = False
+        self._refresh_list()
+        search_entry.focus_set()
+
+        root = self.winfo_toplevel()
+        self.after(120, lambda: self._arm_outside_click(root))
+
+    def _arm_outside_click(self, root: tk.Misc) -> None:
+        if not self._open:
             return
-        if not self._entry_var.get().strip():
-            self.search_var.set("")
-            self._show_placeholder()
-            self._on_filter()
+        self._outside_click_armed = True
+        self._click_bind_id = root.bind("<Button-1>", self._on_outside_click, add="+")
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.bind("<Escape>", lambda _event: self._close())
 
-    def _on_key_press(self, event: tk.Event) -> None:
-        if self._placeholder_active and event.char:
-            self._leave_placeholder()
+    def _filtered_options(self) -> list[str]:
+        query = self._search_var.get().casefold().strip()
+        if not query:
+            return self._items
+        return [name for name in self._items if query in name.casefold()]
 
-    def _on_text_changed(self, *_args: str) -> None:
-        if self._updating or self._placeholder_active:
+    def _listbox_alive(self) -> bool:
+        return self._listbox is not None and self._listbox.winfo_exists()
+
+    def _refresh_list(self) -> None:
+        if not self._open or not self._listbox_alive():
             return
-        self.search_var.set(self._entry_var.get().strip())
-        self._on_filter()
+        filtered = self._filtered_options()
+        current = self.variable.get()
+        self._updating_list = True
+        self._listbox.delete(0, "end")
+        if not filtered:
+            self._listbox.insert("end", self._empty_label)
+            self._listbox.config(state="disabled")
+            self._updating_list = False
+            return
+        self._listbox.config(state="normal")
+        for name in filtered:
+            self._listbox.insert("end", name)
+        for index, name in enumerate(filtered):
+            if name == current:
+                self._listbox.selection_set(index)
+                self._listbox.see(index)
+                break
+        self._updating_list = False
 
-    def clear(self) -> None:
-        self._placeholder_active = False
-        self._set_entry_text("")
-        self.search_var.set("")
-        self.entry.config(fg=self._text_fg)
-        self.entry.focus_set()
-        self._on_filter()
+    def _focus_list(self) -> None:
+        if not self._listbox_alive():
+            return
+        if self._listbox.size() > 0 and str(self._listbox.get(0)) != self._empty_label:
+            self._listbox.focus_set()
+            if not self._listbox.curselection():
+                self._listbox.selection_set(0)
 
-    def reset(self) -> None:
-        self.clear()
+    def _select_first(self, _event: tk.Event | None = None) -> None:
+        filtered = self._filtered_options()
+        if filtered:
+            self.variable.set(filtered[0])
+        self._close()
+
+    def _on_list_select(self, _event: tk.Event | None = None) -> None:
+        if self._updating_list or not self._listbox_alive():
+            return
+        if self._listbox.cget("state") == "disabled":
+            return
+        selection = self._listbox.curselection()
+        if not selection:
+            return
+        value = self._listbox.get(selection[0])
+        if value == self._empty_label:
+            return
+        self.variable.set(value)
+        self._close()
+
+    def _on_outside_click(self, event: tk.Event) -> None:
+        if not self._open or not self._outside_click_armed or self._popup is None:
+            return
+        if self._contains(self.trigger, event.x_root, event.y_root):
+            return
+        if self._contains(self._popup, event.x_root, event.y_root):
+            return
+        self._close()
+
+    def _contains(self, widget: tk.Misc, x_root: int, y_root: int) -> bool:
+        if not widget.winfo_exists():
+            return False
+        x = widget.winfo_rootx()
+        y = widget.winfo_rooty()
+        return x <= x_root <= x + widget.winfo_width() and y <= y_root <= y + widget.winfo_height()
+
+    def _close(self) -> None:
+        if self._search_trace_id is not None:
+            self._search_var.trace_remove("write", self._search_trace_id)
+            self._search_trace_id = None
+        if self._click_bind_id is not None:
+            self.winfo_toplevel().unbind("<Button-1>", self._click_bind_id)
+            self._click_bind_id = None
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.destroy()
+        self._popup = None
+        self._listbox = None
+        self._open = False
+        self._outside_click_armed = False
 
 # ─── EXCEL ─────────────────────────────────────────────────────────────────────
 
@@ -474,19 +595,21 @@ class ManageProjectsDialog(tk.Toplevel):
         super().__init__(parent)
         self.projects: list[ProjectEntry] = list(projects)
         self.sort_mode = tk.StringVar(value=SORT_LABELS[sort_mode])
-        self.search_var = tk.StringVar()
+        names = project_names(sort_projects(self.projects, sort_mode))
+        self.selected_name = tk.StringVar(value=names[0] if names else "")
         self.on_close = on_close
         self.title("Gérer les projets")
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(320, 320)
         self.grab_set()
         self.attributes("-topmost", True)
         self.configure(bg="#FFFFFF")
         self._build()
-        self._refresh_list()
+        self._refresh_picker()
         self.update_idletasks()
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
-        self.geometry(f"+{px - 260}+{py}")
+        self.geometry(f"320x260+{px - 260}+{py}")
 
     def _build(self):
         BG     = "#FFFFFF"
@@ -505,38 +628,30 @@ class ManageProjectsDialog(tk.Toplevel):
         body = tk.Frame(self, bg=BG, padx=16, pady=12)
         body.pack(fill="both", expand=True)
 
-        tk.Label(body, text="Vos projets", bg=BG, fg=MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 6))
+        top_row = tk.Frame(body, bg=BG)
+        top_row.pack(fill="x", pady=(0, 6))
+        tk.Label(top_row, text="Projet", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
 
-        self.filter_bar = FilterBar(
-            body, self.search_var, self.sort_mode,
-            on_filter=lambda: self._refresh_list(),
-            on_sort=self._on_sort_selected,
+        sort_combo = ttk.Combobox(
+            top_row, textvariable=self.sort_mode, state="readonly",
+            values=[label for label, _mode in SORT_OPTIONS],
+            font=("Segoe UI", 8), width=8,
+        )
+        sort_combo.pack(side="right", padx=(8, 0))
+        sort_combo.bind("<<ComboboxSelected>>", self._on_sort_selected)
+
+        self.project_picker = SearchableDropdown(
+            body, self.selected_name,
             bg=BG, field_bg="#F5F5F5", border=BORDER,
-            muted=MUTED, accent=GREEN, text="#222222",
+            muted=MUTED, accent=GREEN, highlight=GREEN, text="#222222",
+            placeholder="Choisir un projet…",
         )
-        self.filter_bar.pack(fill="x", pady=(0, 4))
-
-        self.count_label = tk.Label(body, text="", bg=BG, fg=MUTED,
-                                    font=("Segoe UI", 8))
-        self.count_label.pack(anchor="w", pady=(0, 6))
-
-        list_frame = tk.Frame(body, bg=BORDER, bd=1, relief="flat")
-        list_frame.pack(fill="both", expand=True)
-        sb = tk.Scrollbar(list_frame, orient="vertical")
-        self.lb = tk.Listbox(
-            list_frame, yscrollcommand=sb.set, selectmode="single",
-            font=("Segoe UI", 10), bg=BG, fg="#222222",
-            selectbackground=GREEN, selectforeground="white",
-            activestyle="none", relief="flat", bd=0,
-            highlightthickness=0, width=28, height=10,
-        )
-        sb.config(command=self.lb.yview)
-        sb.pack(side="right", fill="y")
-        self.lb.pack(fill="both", expand=True, padx=2, pady=2)
+        self.project_picker.pack(fill="x", pady=(0, 12))
+        self.bind("<Configure>", self._on_dialog_configure)
 
         btn_frame = tk.Frame(body, bg=BG)
-        btn_frame.pack(fill="x", pady=(10, 0))
+        btn_frame.pack(fill="x", pady=(0, 0))
 
         def btn(parent, text, color, cmd):
             button = tk.Button(parent, text=text, bg=color, fg="white", bd=0,
@@ -578,50 +693,30 @@ class ManageProjectsDialog(tk.Toplevel):
                 return mode
         return DEFAULT_SORT
 
+    def _on_dialog_configure(self, event: tk.Event) -> None:
+        if event.widget is self:
+            self.project_picker.close_if_open()
+
     def _on_sort_selected(self, _event=None) -> None:
-        self._refresh_list()
+        self._refresh_picker()
 
-    def _visible_projects(self) -> list[ProjectEntry]:
+    def _sorted_names(self) -> list[str]:
         ordered = sort_projects(self.projects, self._current_sort_mode())
-        return filter_projects(ordered, self.search_var.get())
+        return project_names(ordered)
 
-    def _refresh_list(self) -> None:
-        selected = self._selected_name()
-        self.lb.delete(0, "end")
-        visible = self._visible_projects()
-        for entry in visible:
-            self.lb.insert("end", entry["name"])
-
-        total = len(self.projects)
-        shown = len(visible)
-        query = self.search_var.get().strip()
-        if query:
-            suffix = "trouvé" if shown == 1 else "trouvés"
-            self.count_label.config(text=f"{shown} sur {total} {suffix}")
-        else:
-            label = "projet" if total == 1 else "projets"
-            self.count_label.config(text=f"{total} {label}")
-
-        if selected:
-            for index, entry in enumerate(visible):
-                if entry["name"] == selected:
-                    self.lb.selection_set(index)
-                    self.lb.see(index)
-                    break
-        elif visible and query:
-            self.lb.selection_set(0)
-            self.lb.see(0)
+    def _refresh_picker(self) -> None:
+        self.project_picker.set_options(self._sorted_names())
 
     def _selected_name(self) -> str | None:
-        sel = self.lb.curselection()
-        if not sel:
-            return None
-        return self.lb.get(sel[0])
+        name = self.selected_name.get().strip()
+        if name and name in project_names(self.projects):
+            return name
+        return None
 
     def _require_selection(self) -> str | None:
         name = self._selected_name()
         if not name:
-            messagebox.showinfo("Sélection", "Sélectionnez d'abord un projet dans la liste.", parent=self)
+            messagebox.showinfo("Sélection", "Sélectionnez d'abord un projet.", parent=self)
             return None
         return name
 
@@ -649,7 +744,8 @@ class ManageProjectsDialog(tk.Toplevel):
             messagebox.showwarning("Doublon", f"« {new_name} » existe déjà.", parent=self)
             return
         old_entry["name"] = new_name
-        self._refresh_list()
+        self.selected_name.set(new_name)
+        self._refresh_picker()
         rename_project_in_excel(old_name, new_name)
 
     def _delete(self):
@@ -663,7 +759,7 @@ class ManageProjectsDialog(tk.Toplevel):
         ):
             return
         self.projects = [entry for entry in self.projects if entry["name"] != name]
-        self._refresh_list()
+        self._refresh_picker()
 
     def _add(self):
         name = self.new_var.get().strip()
@@ -677,19 +773,14 @@ class ManageProjectsDialog(tk.Toplevel):
             "created": datetime.now().isoformat(timespec="seconds"),
         })
         self.new_var.set("")
-        self.filter_bar.reset()
-        self._refresh_list()
-        visible = self._visible_projects()
-        for index, entry in enumerate(visible):
-            if entry["name"] == name:
-                self.lb.selection_set(index)
-                self.lb.see(index)
-                break
+        self.selected_name.set(name)
+        self._refresh_picker()
 
     def _close(self):
         self.destroy()
 
     def destroy(self):
+        self.project_picker.close_if_open()
         save_config(self.projects, self._current_sort_mode())
         self.on_close(self.projects, self._current_sort_mode())
         self.grab_release()
@@ -701,14 +792,15 @@ class TimeTrackerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("⏱ Time Tracker")
-        self.root.resizable(False, False)
+        self.root.minsize(220, 320)
+        self.root.geometry("220x320")
+        self.root.resizable(True, True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.98)
 
         config = load_config()
         self.projects: list[ProjectEntry] = config["projects"]
         self.sort_mode = tk.StringVar(value=SORT_LABELS[config["sort_mode"]])
-        self.search_var = tk.StringVar()
         names = project_names(sort_projects(self.projects, config["sort_mode"]))
         self.selected_project = tk.StringVar(value=names[0] if names else "")
         self.tracking         = False
@@ -775,10 +867,6 @@ class TimeTrackerApp:
         top_row.pack(fill="x", pady=(0, 6))
         tk.Label(top_row, text="PROJET", bg=BG, fg=MUTED,
                  font=("Segoe UI", 7, "bold")).pack(side="left")
-        tk.Button(top_row, text="Gérer ›", bg=BG, fg=GREEN, bd=0,
-                  font=("Segoe UI", 7, "underline"), cursor="hand2",
-                  activebackground=BG, activeforeground=ACCENT,
-                  command=self._open_manage).pack(side="right")
 
         style = ttk.Style()
         style.theme_use("default")
@@ -789,27 +877,26 @@ class TimeTrackerApp:
                         bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
         style.map("W.TCombobox", fieldbackground=[("readonly", SUBTLE)])
 
-        self.filter_bar = FilterBar(
-            body, self.search_var, self.sort_mode,
-            on_filter=lambda: self._refresh_project_list(),
-            on_sort=self._on_sort_changed,
+        sort_combo = ttk.Combobox(
+            top_row, textvariable=self.sort_mode, state="readonly",
+            values=[label for label, _mode in SORT_OPTIONS],
+            font=("Segoe UI", 8), width=8, style="W.TCombobox",
+        )
+        sort_combo.pack(side="right", padx=(8, 0))
+        sort_combo.bind("<<ComboboxSelected>>", self._on_sort_changed)
+
+        tk.Button(top_row, text="Gérer ›", bg=BG, fg=GREEN, bd=0,
+                  font=("Segoe UI", 7, "underline"), cursor="hand2",
+                  activebackground=BG, activeforeground=ACCENT,
+                  command=self._open_manage).pack(side="right")
+
+        self.project_picker = SearchableDropdown(
+            body, self.selected_project,
             bg=BG, field_bg=SUBTLE, border=BORDER,
-            muted=MUTED, accent=GREEN, text=TEXT,
-            combobox_style="W.TCombobox", sort_width=8,
+            muted=MUTED, accent=ACCENT, highlight=GREEN, text=TEXT,
         )
-        self.filter_bar.pack(fill="x", pady=(0, 6))
-
-        combo_shell = tk.Frame(body, bg=BORDER, padx=1, pady=1)
-        combo_shell.pack(fill="x", pady=(0, 12))
-        combo_inner = tk.Frame(combo_shell, bg=SUBTLE)
-        combo_inner.pack(fill="x")
-
-        self.combo = ttk.Combobox(
-            combo_inner, textvariable=self.selected_project,
-            values=[], state="readonly",
-            font=("Segoe UI", 10), style="W.TCombobox",
-        )
-        self.combo.pack(fill="x", padx=8, ipady=4)
+        self.project_picker.pack(fill="x", pady=(0, 12))
+        self.root.bind("<Configure>", self._on_root_configure)
 
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(0, 12))
 
@@ -857,9 +944,8 @@ class TimeTrackerApp:
     def _refresh_project_list(self, *, persist_sort: bool = False) -> None:
         current = self.selected_project.get()
         ordered = sort_projects(self.projects, self._current_sort_mode())
-        visible = filter_projects(ordered, self.search_var.get())
-        names = project_names(visible)
-        self.combo["values"] = names
+        names = project_names(ordered)
+        self.project_picker.set_options(names)
         if current in names:
             self.selected_project.set(current)
         elif names:
@@ -871,6 +957,10 @@ class TimeTrackerApp:
 
     def _on_sort_changed(self, _event=None) -> None:
         self._refresh_project_list(persist_sort=True)
+
+    def _on_root_configure(self, event: tk.Event) -> None:
+        if event.widget is self.root:
+            self.project_picker.close_if_open()
 
     # ── Drag ──
     def _start_drag(self, e):
