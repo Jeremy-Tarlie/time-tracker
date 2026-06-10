@@ -2,7 +2,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import time
 import threading
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
+from typing import Literal, TypedDict
 import os
 import sys
 import json
@@ -11,6 +13,25 @@ import subprocess
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+SortMode = Literal["alpha_asc", "date_asc", "date_desc"]
+
+class ProjectEntry(TypedDict):
+    name: str
+    created: str
+
+class ProjectsConfig(TypedDict):
+    projects: list[ProjectEntry]
+    sort_mode: SortMode
+
+DEFAULT_SORT: SortMode = "alpha_asc"
+SORT_OPTIONS: list[tuple[str, SortMode]] = [
+    ("A → Z", "alpha_asc"),
+    ("Date ↑", "date_asc"),
+    ("Date ↓", "date_desc"),
+]
+SORT_LABELS: dict[SortMode, str] = {mode: label for label, mode in SORT_OPTIONS}
+APP_VERSION = "1.1.0"
 
 INSTALL_DIR   = os.path.join(os.environ.get("LOCALAPPDATA", ""), "TimeTracker")
 INSTALL_EXE   = os.path.join(INSTALL_DIR, "TimeTracker.exe")
@@ -71,8 +92,15 @@ def _migrate_data(from_dir: str, to_dir: str) -> None:
         if os.path.exists(src) and not os.path.exists(dst):
             shutil.copy2(src, dst)
 
+def _file_hash(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 def ensure_installed() -> None:
-    """Au premier lancement du .exe, installe l'app dans AppData puis relance."""
+    """Installe ou met a jour l'app dans AppData puis relance depuis la copie installee."""
     if not is_frozen() or os.name != "nt":
         return
 
@@ -83,8 +111,14 @@ def ensure_installed() -> None:
         _register_startup(INSTALL_EXE)
         return
 
-    _migrate_data(os.path.dirname(running_exe), INSTALL_DIR)
     first_install = not os.path.exists(INSTALL_EXE)
+    if first_install:
+        # Uniquement a la premiere install : ne jamais ecraser projects.json / Excel existants.
+        _migrate_data(os.path.dirname(running_exe), INSTALL_DIR)
+    needs_update = (
+        not first_install
+        and _file_hash(running_exe) != _file_hash(INSTALL_EXE)
+    )
     shutil.copy2(running_exe, INSTALL_EXE)
     _register_startup(INSTALL_EXE)
 
@@ -97,17 +131,23 @@ def ensure_installed() -> None:
     _create_shortcut(desktop, INSTALL_EXE, INSTALL_DIR)
     _create_shortcut(start_menu, INSTALL_EXE, INSTALL_DIR)
 
-    if first_install:
+    if first_install or needs_update:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo(
-            APP_NAME,
-            f"Installation terminee.\n\n"
-            f"Dossier : {INSTALL_DIR}\n"
-            f"Raccourci Bureau + Menu Demarrer crees.\n"
-            f"L'app se lancera a chaque demarrage de Windows.",
-            parent=root,
-        )
+        if first_install:
+            message = (
+                f"Installation terminee.\n\n"
+                f"Dossier : {INSTALL_DIR}\n"
+                f"Raccourci Bureau + Menu Demarrer crees.\n"
+                f"L'app se lancera a chaque demarrage de Windows."
+            )
+        else:
+            message = (
+                f"Mise a jour terminee (v{APP_VERSION}).\n\n"
+                f"Dossier : {INSTALL_DIR}\n"
+                f"L'application va redemarrer avec la nouvelle version."
+            )
+        messagebox.showinfo(APP_NAME, message, parent=root)
         root.destroy()
 
     creationflags = subprocess.DETACHED_PROCESS if hasattr(subprocess, "DETACHED_PROCESS") else 0
@@ -120,15 +160,196 @@ CONFIG_FILE = os.path.join(APP_DIR, "projects.json")
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 
-def load_projects():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return ["Projet 1", "Projet 2", "Projet 3"]
+def _default_projects() -> list[ProjectEntry]:
+    now = datetime.now().isoformat(timespec="seconds")
+    return [
+        {"name": "Projet 1", "created": now},
+        {"name": "Projet 2", "created": now},
+        {"name": "Projet 3", "created": now},
+    ]
 
-def save_projects(projects):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(projects, f, ensure_ascii=False, indent=2)
+def _normalize_sort_mode(value: str) -> SortMode:
+    if value in ("alpha_asc", "date_asc", "date_desc"):
+        return value  # type: ignore[return-value]
+    return DEFAULT_SORT
+
+def _migrate_legacy_projects(raw: list[str]) -> list[ProjectEntry]:
+    base = datetime.now().replace(microsecond=0)
+    return [
+        {"name": name, "created": (base + timedelta(seconds=index)).isoformat(timespec="seconds")}
+        for index, name in enumerate(raw)
+    ]
+
+def load_config() -> ProjectsConfig:
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if isinstance(raw, list):
+            return {"projects": _migrate_legacy_projects(raw), "sort_mode": DEFAULT_SORT}
+        projects = raw.get("projects", _default_projects())
+        normalized: list[ProjectEntry] = []
+        for item in projects:
+            if isinstance(item, str):
+                normalized.append({"name": item, "created": datetime.now().isoformat(timespec="seconds")})
+            else:
+                normalized.append({
+                    "name": str(item["name"]),
+                    "created": str(item.get("created", datetime.now().isoformat(timespec="seconds"))),
+                })
+        return {
+            "projects": normalized,
+            "sort_mode": _normalize_sort_mode(str(raw.get("sort_mode", DEFAULT_SORT))),
+        }
+    return {"projects": _default_projects(), "sort_mode": DEFAULT_SORT}
+
+def save_config(projects: list[ProjectEntry], sort_mode: SortMode) -> None:
+    payload: ProjectsConfig = {"projects": projects, "sort_mode": sort_mode}
+    with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+def sort_projects(projects: list[ProjectEntry], mode: SortMode) -> list[ProjectEntry]:
+    if mode == "alpha_asc":
+        return sorted(projects, key=lambda entry: entry["name"].casefold())
+    if mode == "date_asc":
+        return sorted(projects, key=lambda entry: entry["created"])
+    return sorted(projects, key=lambda entry: entry["created"], reverse=True)
+
+def filter_projects(projects: list[ProjectEntry], query: str) -> list[ProjectEntry]:
+    needle = query.strip().casefold()
+    if not needle:
+        return projects
+    return [entry for entry in projects if needle in entry["name"].casefold()]
+
+def project_names(projects: list[ProjectEntry]) -> list[str]:
+    return [entry["name"] for entry in projects]
+
+class FilterBar(tk.Frame):
+    """Barre recherche (placeholder + effacer) et tri dans un seul bloc."""
+
+    PLACEHOLDER = "Filtrer les projets…"
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        search_var: tk.StringVar,
+        sort_var: tk.StringVar,
+        on_filter,
+        on_sort,
+        *,
+        bg: str,
+        field_bg: str,
+        border: str,
+        muted: str,
+        accent: str,
+        text: str,
+        sort_width: int = 9,
+        combobox_style: str | None = None,
+    ) -> None:
+        super().__init__(parent, bg=bg)
+        self.search_var = search_var
+        self._on_filter = on_filter
+        self._muted = muted
+        self._accent = accent
+        self._field_bg = field_bg
+        self._text_fg = text
+        self._placeholder_active = False
+        self._updating = False
+
+        shell = tk.Frame(self, bg=border, padx=1, pady=1)
+        shell.pack(fill="x")
+        inner = tk.Frame(shell, bg=field_bg)
+        inner.pack(fill="x")
+
+        tk.Label(inner, text="⌕", bg=field_bg, fg=muted,
+                 font=("Segoe UI", 11)).pack(side="left", padx=(10, 4))
+
+        self._entry_var = tk.StringVar()
+        self.entry = tk.Entry(
+            inner, textvariable=self._entry_var,
+            font=("Segoe UI", 10), bg=field_bg, fg=muted,
+            relief="flat", bd=0, highlightthickness=0,
+        )
+        self.entry.pack(side="left", fill="x", expand=True, ipady=6)
+
+        self.clear_btn = tk.Button(
+            inner, text="×", bg=field_bg, fg=muted, bd=0,
+            font=("Segoe UI", 12), cursor="hand2", padx=4,
+            activebackground=field_bg, activeforeground=accent,
+            command=self.clear,
+        )
+        self.clear_btn.pack(side="right", padx=(0, 2))
+
+        self._separator = tk.Frame(inner, bg=border, width=1)
+        self._separator.pack(side="right", fill="y", padx=(4, 6), pady=6)
+
+        sort_kwargs: dict[str, object] = {
+            "textvariable": sort_var,
+            "state": "readonly",
+            "values": [label for label, _mode in SORT_OPTIONS],
+            "font": ("Segoe UI", 9),
+            "width": sort_width,
+        }
+        if combobox_style:
+            sort_kwargs["style"] = combobox_style
+        sort_combo = ttk.Combobox(inner, **sort_kwargs)
+        sort_combo.pack(side="right", padx=(0, 8), ipady=2)
+        sort_combo.bind("<<ComboboxSelected>>", on_sort)
+
+        self.entry.bind("<FocusIn>", self._on_focus_in)
+        self.entry.bind("<FocusOut>", self._on_focus_out)
+        self.entry.bind("<KeyPress>", self._on_key_press)
+        self._entry_var.trace_add("write", self._on_text_changed)
+        self._show_placeholder()
+
+    def _set_entry_text(self, value: str) -> None:
+        self._updating = True
+        self._entry_var.set(value)
+        self._updating = False
+
+    def _show_placeholder(self) -> None:
+        self._placeholder_active = True
+        self._set_entry_text(self.PLACEHOLDER)
+        self.entry.config(fg=self._muted)
+
+    def _leave_placeholder(self) -> None:
+        if not self._placeholder_active:
+            return
+        self._placeholder_active = False
+        self._set_entry_text("")
+        self.entry.config(fg=self._text_fg)
+
+    def _on_focus_in(self, _event: tk.Event) -> None:
+        if self._placeholder_active:
+            self._leave_placeholder()
+
+    def _on_focus_out(self, _event: tk.Event) -> None:
+        if self._placeholder_active:
+            return
+        if not self._entry_var.get().strip():
+            self.search_var.set("")
+            self._show_placeholder()
+            self._on_filter()
+
+    def _on_key_press(self, event: tk.Event) -> None:
+        if self._placeholder_active and event.char:
+            self._leave_placeholder()
+
+    def _on_text_changed(self, *_args: str) -> None:
+        if self._updating or self._placeholder_active:
+            return
+        self.search_var.set(self._entry_var.get().strip())
+        self._on_filter()
+
+    def clear(self) -> None:
+        self._placeholder_active = False
+        self._set_entry_text("")
+        self.search_var.set("")
+        self.entry.config(fg=self._text_fg)
+        self.entry.focus_set()
+        self._on_filter()
+
+    def reset(self) -> None:
+        self.clear()
 
 # ─── EXCEL ─────────────────────────────────────────────────────────────────────
 
@@ -243,16 +464,25 @@ def _refresh_summary(wb):
 class ManageProjectsDialog(tk.Toplevel):
     """Fenêtre modale pour gérer (modifier / supprimer) les projets."""
 
-    def __init__(self, parent, projects, on_close):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        projects: list[ProjectEntry],
+        sort_mode: SortMode,
+        on_close,
+    ):
         super().__init__(parent)
-        self.projects  = list(projects)
-        self.on_close  = on_close
+        self.projects: list[ProjectEntry] = list(projects)
+        self.sort_mode = tk.StringVar(value=SORT_LABELS[sort_mode])
+        self.search_var = tk.StringVar()
+        self.on_close = on_close
         self.title("Gérer les projets")
         self.resizable(False, False)
         self.grab_set()
         self.attributes("-topmost", True)
         self.configure(bg="#FFFFFF")
         self._build()
+        self._refresh_list()
         self.update_idletasks()
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
@@ -266,7 +496,6 @@ class ManageProjectsDialog(tk.Toplevel):
         MUTED  = "#888888"
         BORDER = "#E0E0E0"
 
-        # Header
         hdr = tk.Frame(self, bg=ACCENT, height=36)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
@@ -279,7 +508,19 @@ class ManageProjectsDialog(tk.Toplevel):
         tk.Label(body, text="Vos projets", bg=BG, fg=MUTED,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 6))
 
-        # Listbox + scrollbar
+        self.filter_bar = FilterBar(
+            body, self.search_var, self.sort_mode,
+            on_filter=lambda: self._refresh_list(),
+            on_sort=self._on_sort_selected,
+            bg=BG, field_bg="#F5F5F5", border=BORDER,
+            muted=MUTED, accent=GREEN, text="#222222",
+        )
+        self.filter_bar.pack(fill="x", pady=(0, 4))
+
+        self.count_label = tk.Label(body, text="", bg=BG, fg=MUTED,
+                                    font=("Segoe UI", 8))
+        self.count_label.pack(anchor="w", pady=(0, 6))
+
         list_frame = tk.Frame(body, bg=BORDER, bd=1, relief="flat")
         list_frame.pack(fill="both", expand=True)
         sb = tk.Scrollbar(list_frame, orient="vertical")
@@ -288,33 +529,28 @@ class ManageProjectsDialog(tk.Toplevel):
             font=("Segoe UI", 10), bg=BG, fg="#222222",
             selectbackground=GREEN, selectforeground="white",
             activestyle="none", relief="flat", bd=0,
-            highlightthickness=0, width=28, height=10
+            highlightthickness=0, width=28, height=10,
         )
         sb.config(command=self.lb.yview)
         sb.pack(side="right", fill="y")
         self.lb.pack(fill="both", expand=True, padx=2, pady=2)
-        for p in self.projects:
-            self.lb.insert("end", p)
 
-        # Action buttons
         btn_frame = tk.Frame(body, bg=BG)
         btn_frame.pack(fill="x", pady=(10, 0))
 
         def btn(parent, text, color, cmd):
-            b = tk.Button(parent, text=text, bg=color, fg="white", bd=0,
-                          font=("Segoe UI", 9, "bold"), cursor="hand2",
-                          padx=10, pady=6, activebackground=ACCENT,
-                          activeforeground="white", command=cmd)
-            b.pack(side="left", padx=(0, 6))
-            return b
+            button = tk.Button(parent, text=text, bg=color, fg="white", bd=0,
+                               font=("Segoe UI", 9, "bold"), cursor="hand2",
+                               padx=10, pady=6, activebackground=ACCENT,
+                               activeforeground="white", command=cmd)
+            button.pack(side="left", padx=(0, 6))
+            return button
 
-        btn(btn_frame, "✏  Renommer", ACCENT,  self._rename)
-        btn(btn_frame, "🗑  Supprimer", RED,    self._delete)
+        btn(btn_frame, "✏  Renommer", ACCENT, self._rename)
+        btn(btn_frame, "🗑  Supprimer", RED, self._delete)
 
-        # Separator
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 8))
 
-        # Add new project inline
         tk.Label(body, text="Ajouter un projet", bg=BG, fg=MUTED,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 4))
         add_row = tk.Frame(body, bg=BG)
@@ -325,74 +561,138 @@ class ManageProjectsDialog(tk.Toplevel):
                          relief="flat", bd=0, highlightthickness=1,
                          highlightbackground=BORDER, highlightcolor=GREEN)
         entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
-        entry.bind("<Return>", lambda e: self._add())
+        entry.bind("<Return>", lambda _event: self._add())
         tk.Button(add_row, text="＋ Ajouter", bg=GREEN, fg="white", bd=0,
                   font=("Segoe UI", 9, "bold"), cursor="hand2",
                   padx=10, pady=6, activebackground=ACCENT,
                   activeforeground="white", command=self._add).pack(side="left")
 
-        # Close
         tk.Button(body, text="Fermer", bg="#F0F0F0", fg="#444444", bd=0,
                   font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6,
                   command=self._close).pack(anchor="e", pady=(12, 0))
 
-    def _selected_index(self):
+    def _current_sort_mode(self) -> SortMode:
+        label = self.sort_mode.get()
+        for option_label, mode in SORT_OPTIONS:
+            if option_label == label:
+                return mode
+        return DEFAULT_SORT
+
+    def _on_sort_selected(self, _event=None) -> None:
+        self._refresh_list()
+
+    def _visible_projects(self) -> list[ProjectEntry]:
+        ordered = sort_projects(self.projects, self._current_sort_mode())
+        return filter_projects(ordered, self.search_var.get())
+
+    def _refresh_list(self) -> None:
+        selected = self._selected_name()
+        self.lb.delete(0, "end")
+        visible = self._visible_projects()
+        for entry in visible:
+            self.lb.insert("end", entry["name"])
+
+        total = len(self.projects)
+        shown = len(visible)
+        query = self.search_var.get().strip()
+        if query:
+            suffix = "trouvé" if shown == 1 else "trouvés"
+            self.count_label.config(text=f"{shown} sur {total} {suffix}")
+        else:
+            label = "projet" if total == 1 else "projets"
+            self.count_label.config(text=f"{total} {label}")
+
+        if selected:
+            for index, entry in enumerate(visible):
+                if entry["name"] == selected:
+                    self.lb.selection_set(index)
+                    self.lb.see(index)
+                    break
+        elif visible and query:
+            self.lb.selection_set(0)
+            self.lb.see(0)
+
+    def _selected_name(self) -> str | None:
         sel = self.lb.curselection()
         if not sel:
+            return None
+        return self.lb.get(sel[0])
+
+    def _require_selection(self) -> str | None:
+        name = self._selected_name()
+        if not name:
             messagebox.showinfo("Sélection", "Sélectionnez d'abord un projet dans la liste.", parent=self)
             return None
-        return sel[0]
+        return name
+
+    def _find_project(self, name: str) -> ProjectEntry | None:
+        for entry in self.projects:
+            if entry["name"] == name:
+                return entry
+        return None
 
     def _rename(self):
-        idx = self._selected_index()
-        if idx is None:
+        old_name = self._require_selection()
+        if old_name is None:
             return
-        old = self.projects[idx]
-        new = simpledialog.askstring("Renommer", f"Nouveau nom pour « {old} » :", initialvalue=old, parent=self)
-        if not new or not new.strip() or new.strip() == old:
+        old_entry = self._find_project(old_name)
+        if old_entry is None:
             return
-        new = new.strip()
-        if new in self.projects:
-            messagebox.showwarning("Doublon", f"« {new} » existe déjà.", parent=self)
+        new = simpledialog.askstring(
+            "Renommer", f"Nouveau nom pour « {old_name} » :",
+            initialvalue=old_name, parent=self,
+        )
+        if not new or not new.strip() or new.strip() == old_name:
             return
-        self.projects[idx] = new
-        self.lb.delete(idx)
-        self.lb.insert(idx, new)
-        self.lb.selection_set(idx)
-        rename_project_in_excel(old, new)
+        new_name = new.strip()
+        if any(entry["name"] == new_name for entry in self.projects):
+            messagebox.showwarning("Doublon", f"« {new_name} » existe déjà.", parent=self)
+            return
+        old_entry["name"] = new_name
+        self._refresh_list()
+        rename_project_in_excel(old_name, new_name)
 
     def _delete(self):
-        idx = self._selected_index()
-        if idx is None:
+        name = self._require_selection()
+        if name is None:
             return
-        name = self.projects[idx]
-        if not messagebox.askyesno("Confirmer", f"Supprimer « {name} » ?\n\nLes sessions Excel seront conservées.", parent=self):
+        if not messagebox.askyesno(
+            "Confirmer",
+            f"Supprimer « {name} » ?\n\nLes sessions Excel seront conservées.",
+            parent=self,
+        ):
             return
-        self.projects.pop(idx)
-        self.lb.delete(idx)
+        self.projects = [entry for entry in self.projects if entry["name"] != name]
+        self._refresh_list()
 
     def _add(self):
         name = self.new_var.get().strip()
         if not name:
             return
-        if name in self.projects:
+        if any(entry["name"] == name for entry in self.projects):
             messagebox.showwarning("Doublon", f"« {name} » existe déjà.", parent=self)
             return
-        self.projects.append(name)
-        self.lb.insert("end", name)
-        self.lb.selection_clear(0, "end")
-        self.lb.selection_set("end")
-        self.lb.see("end")
+        self.projects.append({
+            "name": name,
+            "created": datetime.now().isoformat(timespec="seconds"),
+        })
         self.new_var.set("")
+        self.filter_bar.reset()
+        self._refresh_list()
+        visible = self._visible_projects()
+        for index, entry in enumerate(visible):
+            if entry["name"] == name:
+                self.lb.selection_set(index)
+                self.lb.see(index)
+                break
 
     def _close(self):
-        save_projects(self.projects)
-        self.on_close(self.projects)
         self.destroy()
 
     def destroy(self):
-        save_projects(self.projects)
-        self.on_close(self.projects)
+        save_config(self.projects, self._current_sort_mode())
+        self.on_close(self.projects, self._current_sort_mode())
+        self.grab_release()
         super().destroy()
 
 # ─── MAIN APP ──────────────────────────────────────────────────────────────────
@@ -405,14 +705,19 @@ class TimeTrackerApp:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.98)
 
-        self.projects         = load_projects()
-        self.selected_project = tk.StringVar(value=self.projects[0] if self.projects else "")
+        config = load_config()
+        self.projects: list[ProjectEntry] = config["projects"]
+        self.sort_mode = tk.StringVar(value=SORT_LABELS[config["sort_mode"]])
+        self.search_var = tk.StringVar()
+        names = project_names(sort_projects(self.projects, config["sort_mode"]))
+        self.selected_project = tk.StringVar(value=names[0] if names else "")
         self.tracking         = False
         self.start_time       = None
         self.elapsed          = 0
         self._running         = False
 
         self._build_ui()
+        self._refresh_project_list()
         self._position_window()
 
     def _position_window(self):
@@ -467,17 +772,13 @@ class TimeTrackerApp:
 
         # Project label + manage link
         top_row = tk.Frame(body, bg=BG)
-        top_row.pack(fill="x", pady=(0, 4))
+        top_row.pack(fill="x", pady=(0, 6))
         tk.Label(top_row, text="PROJET", bg=BG, fg=MUTED,
                  font=("Segoe UI", 7, "bold")).pack(side="left")
         tk.Button(top_row, text="Gérer ›", bg=BG, fg=GREEN, bd=0,
                   font=("Segoe UI", 7, "underline"), cursor="hand2",
                   activebackground=BG, activeforeground=ACCENT,
                   command=self._open_manage).pack(side="right")
-
-        # Combobox row
-        combo_row = tk.Frame(body, bg=BG)
-        combo_row.pack(fill="x", pady=(0, 12))
 
         style = ttk.Style()
         style.theme_use("default")
@@ -488,15 +789,30 @@ class TimeTrackerApp:
                         bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
         style.map("W.TCombobox", fieldbackground=[("readonly", SUBTLE)])
 
-        self.combo = ttk.Combobox(combo_row, textvariable=self.selected_project,
-                                   values=self.projects, state="readonly",
-                                   font=("Segoe UI", 10), style="W.TCombobox", width=22)
-        self.combo.pack(side="left", fill="x", expand=True)
+        self.filter_bar = FilterBar(
+            body, self.search_var, self.sort_mode,
+            on_filter=lambda: self._refresh_project_list(),
+            on_sort=self._on_sort_changed,
+            bg=BG, field_bg=SUBTLE, border=BORDER,
+            muted=MUTED, accent=GREEN, text=TEXT,
+            combobox_style="W.TCombobox", sort_width=8,
+        )
+        self.filter_bar.pack(fill="x", pady=(0, 6))
 
-        # Thin separator
+        combo_shell = tk.Frame(body, bg=BORDER, padx=1, pady=1)
+        combo_shell.pack(fill="x", pady=(0, 12))
+        combo_inner = tk.Frame(combo_shell, bg=SUBTLE)
+        combo_inner.pack(fill="x")
+
+        self.combo = ttk.Combobox(
+            combo_inner, textvariable=self.selected_project,
+            values=[], state="readonly",
+            font=("Segoe UI", 10), style="W.TCombobox",
+        )
+        self.combo.pack(fill="x", padx=8, ipady=4)
+
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(0, 12))
 
-        # Timer
         self.timer_label = tk.Label(body, text="00:00:00", bg=BG, fg=TIMER_COLOR,
                                      font=("Segoe UI Mono", 32, "bold"))
         self.timer_label.pack()
@@ -505,7 +821,6 @@ class TimeTrackerApp:
                                       font=("Segoe UI", 9))
         self.status_label.pack(pady=(2, 14))
 
-        # Start / Stop
         btn_row = tk.Frame(body, bg=BG)
         btn_row.pack(fill="x")
 
@@ -525,14 +840,37 @@ class TimeTrackerApp:
         )
         self.stop_btn.pack(side="left", fill="x", expand=True)
 
-        # Thin separator
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 8))
 
-        # Open Excel
         tk.Button(body, text="📊  Ouvrir le fichier Excel", bg=BG, fg=MUTED,
                   font=("Segoe UI", 8), bd=0, cursor="hand2",
                   activebackground=BG, activeforeground=ACCENT,
                   command=self._open_excel).pack()
+
+    def _current_sort_mode(self) -> SortMode:
+        label = self.sort_mode.get()
+        for option_label, mode in SORT_OPTIONS:
+            if option_label == label:
+                return mode
+        return DEFAULT_SORT
+
+    def _refresh_project_list(self, *, persist_sort: bool = False) -> None:
+        current = self.selected_project.get()
+        ordered = sort_projects(self.projects, self._current_sort_mode())
+        visible = filter_projects(ordered, self.search_var.get())
+        names = project_names(visible)
+        self.combo["values"] = names
+        if current in names:
+            self.selected_project.set(current)
+        elif names:
+            self.selected_project.set(names[0])
+        else:
+            self.selected_project.set("")
+        if persist_sort:
+            save_config(self.projects, self._current_sort_mode())
+
+    def _on_sort_changed(self, _event=None) -> None:
+        self._refresh_project_list(persist_sort=True)
 
     # ── Drag ──
     def _start_drag(self, e):
@@ -546,8 +884,9 @@ class TimeTrackerApp:
 
     # ── Timer ──
     def _start(self):
-        if not self.selected_project.get():
-            messagebox.showwarning("Projet manquant", "Sélectionnez un projet d'abord.")
+        project = self.selected_project.get().strip()
+        if project not in project_names(self.projects):
+            messagebox.showwarning("Projet manquant", "Sélectionnez un projet valide dans la liste.")
             return
         self.tracking   = True
         self.start_time = datetime.now()
@@ -595,13 +934,17 @@ class TimeTrackerApp:
 
     # ── Manage projects ──
     def _open_manage(self):
-        ManageProjectsDialog(self.root, self.projects, self._on_projects_updated)
+        ManageProjectsDialog(
+            self.root,
+            self.projects,
+            self._current_sort_mode(),
+            self._on_projects_updated,
+        )
 
-    def _on_projects_updated(self, new_projects):
+    def _on_projects_updated(self, new_projects: list[ProjectEntry], sort_mode: SortMode):
         self.projects = new_projects
-        self.combo["values"] = self.projects
-        if self.selected_project.get() not in self.projects:
-            self.selected_project.set(self.projects[0] if self.projects else "")
+        self.sort_mode.set(SORT_LABELS[sort_mode])
+        self._refresh_project_list(persist_sort=True)
 
     # ── Excel ──
     def _open_excel(self):
@@ -623,6 +966,8 @@ class TimeTrackerApp:
 if __name__ == "__main__":
     ensure_installed()
     ensure_excel()
+    startup_config = load_config()
+    save_config(startup_config["projects"], startup_config["sort_mode"])
     root = tk.Tk()
     app  = TimeTrackerApp(root)
     root.mainloop()
