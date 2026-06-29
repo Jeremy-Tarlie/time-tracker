@@ -1,10 +1,10 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import time
 import threading
 import hashlib
 from datetime import datetime, timedelta
-from typing import Literal, TypedDict
+from typing import Callable, Literal, TypedDict
 import os
 import sys
 import json
@@ -23,6 +23,7 @@ class ProjectEntry(TypedDict):
 class ProjectsConfig(TypedDict):
     projects: list[ProjectEntry]
     sort_mode: SortMode
+    excel_file: str
 
 DEFAULT_SORT: SortMode = "alpha_asc"
 SORT_OPTIONS: list[tuple[str, SortMode]] = [
@@ -31,7 +32,7 @@ SORT_OPTIONS: list[tuple[str, SortMode]] = [
     ("Date ↓", "date_desc"),
 ]
 SORT_LABELS: dict[SortMode, str] = {mode: label for label, mode in SORT_OPTIONS}
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 INSTALL_DIR   = os.path.join(os.environ.get("LOCALAPPDATA", ""), "TimeTracker")
 INSTALL_EXE   = os.path.join(INSTALL_DIR, "TimeTracker.exe")
@@ -155,8 +156,17 @@ def ensure_installed() -> None:
     sys.exit(0)
 
 APP_DIR     = get_app_data_dir()
-EXCEL_FILE  = os.path.join(APP_DIR, "heures_projet.xlsx")
 CONFIG_FILE = os.path.join(APP_DIR, "projects.json")
+DEFAULT_EXCEL_NAME = "heures_projet.xlsx"
+
+def default_excel_path() -> str:
+    return os.path.join(APP_DIR, DEFAULT_EXCEL_NAME)
+
+def normalize_excel_path(path: str) -> str:
+    cleaned = os.path.abspath(os.path.expanduser(path.strip()))
+    if not cleaned.lower().endswith(".xlsx"):
+        cleaned = f"{cleaned}.xlsx"
+    return cleaned
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 
@@ -185,7 +195,11 @@ def load_config() -> ProjectsConfig:
         with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
         if isinstance(raw, list):
-            return {"projects": _migrate_legacy_projects(raw), "sort_mode": DEFAULT_SORT}
+            return {
+                "projects": _migrate_legacy_projects(raw),
+                "sort_mode": DEFAULT_SORT,
+                "excel_file": default_excel_path(),
+            }
         projects = raw.get("projects", _default_projects())
         normalized: list[ProjectEntry] = []
         for item in projects:
@@ -196,14 +210,25 @@ def load_config() -> ProjectsConfig:
                     "name": str(item["name"]),
                     "created": str(item.get("created", datetime.now().isoformat(timespec="seconds"))),
                 })
+        excel_raw = raw.get("excel_file")
+        excel_file = normalize_excel_path(str(excel_raw)) if excel_raw else default_excel_path()
         return {
             "projects": normalized,
             "sort_mode": _normalize_sort_mode(str(raw.get("sort_mode", DEFAULT_SORT))),
+            "excel_file": excel_file,
         }
-    return {"projects": _default_projects(), "sort_mode": DEFAULT_SORT}
+    return {
+        "projects": _default_projects(),
+        "sort_mode": DEFAULT_SORT,
+        "excel_file": default_excel_path(),
+    }
 
-def save_config(projects: list[ProjectEntry], sort_mode: SortMode) -> None:
-    payload: ProjectsConfig = {"projects": projects, "sort_mode": sort_mode}
+def save_config(config: ProjectsConfig) -> None:
+    payload: ProjectsConfig = {
+        "projects": config["projects"],
+        "sort_mode": config["sort_mode"],
+        "excel_file": normalize_excel_path(config["excel_file"]),
+    }
     with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
@@ -483,9 +508,33 @@ def thin_border():
     s = Side(style="thin", color="B7E4C7")
     return Border(left=s, right=s, top=s, bottom=s)
 
-def ensure_excel():
-    if os.path.exists(EXCEL_FILE):
+def _row_has_data(values: tuple[object, ...]) -> bool:
+    return any(value is not None and str(value).strip() != "" for value in values)
+
+def _last_row_with_data(ws, *, min_row: int = 2) -> int:
+    """Dernière ligne contenant des données (openpyxl.max_row peut être incorrect après édition manuelle)."""
+    last = min_row - 1
+    for row_idx, row in enumerate(ws.iter_rows(min_row=min_row, values_only=True), start=min_row):
+        if _row_has_data(row):
+            last = row_idx
+    return last
+
+def _next_session_row(ws) -> int:
+    last = _last_row_with_data(ws, min_row=2)
+    return max(last + 1, 2)
+
+def _clear_summary_row(ws2, row_idx: int) -> None:
+    for col in range(1, 4):
+        cell = ws2.cell(row=row_idx, column=col)
+        cell.value = None
+        cell.fill = WHITE_FILL
+
+def ensure_excel(excel_path: str) -> None:
+    if os.path.exists(excel_path):
         return
+    parent_dir = os.path.dirname(excel_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Sessions"
@@ -518,15 +567,15 @@ def ensure_excel():
     ws2.column_dimensions["B"].width = 16
     ws2.column_dimensions["C"].width = 14
     ws2.freeze_panes = "A3"
-    wb.save(EXCEL_FILE)
+    wb.save(excel_path)
 
-def log_session(project, start_dt, end_dt, notes=""):
-    ensure_excel()
-    wb = load_workbook(EXCEL_FILE)
+def log_session(project: str, start_dt: datetime, end_dt: datetime, notes: str, excel_path: str) -> None:
+    ensure_excel(excel_path)
+    wb = load_workbook(excel_path)
     ws = wb["Sessions"]
     duration_h   = (end_dt - start_dt).total_seconds() / 3600
     duration_min = (end_dt - start_dt).total_seconds() / 60
-    nr   = ws.max_row + 1
+    nr   = _next_session_row(ws)
     fill = ALT_FILL if nr % 2 == 0 else WHITE_FILL
     values = [
         start_dt.strftime("%d/%m/%Y"), project,
@@ -542,35 +591,40 @@ def log_session(project, start_dt, end_dt, notes=""):
     ws.cell(row=nr, column=5).number_format = "0.00"
     ws.cell(row=nr, column=6).number_format = "0.0"
     _refresh_summary(wb)
-    wb.save(EXCEL_FILE)
+    wb.save(excel_path)
 
-def rename_project_in_excel(old_name, new_name):
-    if not os.path.exists(EXCEL_FILE):
+def rename_project_in_excel(old_name: str, new_name: str, excel_path: str) -> None:
+    if not os.path.exists(excel_path):
         return
-    wb = load_workbook(EXCEL_FILE)
+    wb = load_workbook(excel_path)
     ws = wb["Sessions"]
     for row in ws.iter_rows(min_row=2):
         if row[1].value == old_name:
             row[1].value = new_name
     _refresh_summary(wb)
-    wb.save(EXCEL_FILE)
+    wb.save(excel_path)
 
 def _refresh_summary(wb):
     ws  = wb["Sessions"]
     ws2 = wb["Résumé par projet"]
-    for row in ws2.iter_rows(min_row=3, max_row=ws2.max_row):
-        for cell in row:
-            cell.value = None
-            cell.fill  = WHITE_FILL
-    totals = {}
+    totals: dict[str, dict[str, float | int]] = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         if row[1]:
-            p = row[1]
-            h = row[4] or 0
-            totals[p] = totals.get(p, {"h": 0, "n": 0})
+            p = str(row[1])
+            h = float(row[4] or 0)
+            totals[p] = totals.get(p, {"h": 0.0, "n": 0})
             totals[p]["h"] += h
             totals[p]["n"] += 1
-    for i, (p, data) in enumerate(sorted(totals.items()), start=3):
+    sorted_projects = sorted(totals.items())
+    auto_end = 2 + len(sorted_projects)
+    for i in range(3, auto_end + 1):
+        _clear_summary_row(ws2, i)
+    # Supprimer d'anciennes lignes auto en doublon sans toucher aux lignes manuelles.
+    for i in range(auto_end + 1, _last_row_with_data(ws2, min_row=3) + 1):
+        name = ws2.cell(row=i, column=1).value
+        if name is not None and str(name) in totals:
+            _clear_summary_row(ws2, i)
+    for i, (p, data) in enumerate(sorted_projects, start=3):
         fill2 = ALT_FILL if i % 2 == 0 else WHITE_FILL
         for col, val in enumerate([p, round(data["h"], 2), data["n"]], 1):
             cell = ws2.cell(row=i, column=col, value=val)
@@ -579,6 +633,172 @@ def _refresh_summary(wb):
             cell.border    = thin_border()
             cell.alignment = Alignment(horizontal="center" if col != 1 else "left")
         ws2.cell(row=i, column=2).number_format = "0.00"
+
+def open_excel_file(excel_path: str, *, parent: tk.Misc | None = None) -> bool:
+    raw = excel_path.strip()
+    if not raw:
+        messagebox.showwarning("Chemin manquant", "Indiquez un chemin de fichier.", parent=parent)
+        return False
+    path = normalize_excel_path(raw)
+    parent_dir = os.path.dirname(path)
+    if parent_dir and not os.path.isdir(parent_dir):
+        messagebox.showwarning(
+            "Dossier introuvable",
+            f"Le dossier suivant n'existe pas :\n{parent_dir}",
+            parent=parent,
+        )
+        return False
+    ensure_excel(path)
+    try:
+        if os.name == "nt":
+            os.startfile(path)
+        else:
+            try:
+                sysname = os.uname().sysname
+            except AttributeError:
+                sysname = ""
+            if sysname == "Darwin":
+                os.system(f'open "{path}"')
+            else:
+                os.system(f'xdg-open "{path}"')
+    except OSError as exc:
+        messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{exc}", parent=parent)
+        return False
+    return True
+
+# ─── EXCEL FILE DIALOG ─────────────────────────────────────────────────────────
+
+class ExcelFileDialog(tk.Toplevel):
+    """Fenêtre modale pour choisir l'emplacement et le nom du fichier Excel."""
+
+    def __init__(self, parent: tk.Misc, excel_file: str, on_save: Callable[[str], None]) -> None:
+        super().__init__(parent)
+        self._on_save = on_save
+        self._path_var = tk.StringVar(value=excel_file)
+        self.title("Fichier Excel")
+        self.resizable(True, True)
+        self.minsize(360, 200)
+        self.grab_set()
+        self.attributes("-topmost", True)
+        self.configure(bg="#FFFFFF")
+        self._build()
+        self.update_idletasks()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        self.geometry(f"500x220+{px - 250}+{py}")
+
+    def _build(self) -> None:
+        BG = "#FFFFFF"
+        ACCENT = "#40916C"
+        GREEN = "#52B788"
+        MUTED = "#888888"
+        BORDER = "#E0E0E0"
+
+        hdr = tk.Frame(self, bg=ACCENT, height=36)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="📁  Fichier Excel", bg=ACCENT, fg="white",
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=12, pady=6)
+
+        body = tk.Frame(self, bg=BG, padx=16, pady=12)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Emplacement et nom du fichier d'export :",
+            bg=BG, fg=MUTED, font=("Segoe UI", 8, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+
+        path_row = tk.Frame(body, bg=BG)
+        path_row.pack(fill="x", pady=(0, 8))
+        self._path_entry = tk.Entry(
+            path_row, textvariable=self._path_var,
+            font=("Segoe UI", 9), bg="#F5F5F5", fg="#222222",
+            relief="flat", bd=0, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=GREEN,
+        )
+        self._path_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
+        tk.Button(
+            path_row, text="Ouvrir", bg="#F0F0F0", fg="#444444", bd=0,
+            font=("Segoe UI", 9), cursor="hand2",
+            padx=10, pady=6, command=self._open,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            path_row, text="Parcourir…", bg=GREEN, fg="white", bd=0,
+            font=("Segoe UI", 9, "bold"), cursor="hand2",
+            padx=10, pady=6, activebackground=ACCENT,
+            activeforeground="white", command=self._browse,
+        ).pack(side="left")
+
+        tk.Label(
+            body,
+            text="Les nouvelles sessions seront enregistrées à cet emplacement.\n"
+                 "L'ancien fichier n'est pas déplacé automatiquement.",
+            bg=BG, fg=MUTED, font=("Segoe UI", 8), justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        btn_row = tk.Frame(body, bg=BG)
+        btn_row.pack(fill="x")
+
+        tk.Button(
+            btn_row, text="Par défaut", bg="#F0F0F0", fg="#444444", bd=0,
+            font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6,
+            command=self._use_default,
+        ).pack(side="left")
+
+        tk.Button(
+            btn_row, text="Annuler", bg="#F0F0F0", fg="#444444", bd=0,
+            font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6,
+            command=self.destroy,
+        ).pack(side="right", padx=(6, 0))
+
+        tk.Button(
+            btn_row, text="Enregistrer", bg=ACCENT, fg="white", bd=0,
+            font=("Segoe UI", 9, "bold"), cursor="hand2", padx=12, pady=6,
+            activebackground=GREEN, activeforeground="white",
+            command=self._save,
+        ).pack(side="right")
+
+    def _browse(self) -> None:
+        current = self._path_var.get().strip() or default_excel_path()
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Choisir l'emplacement du fichier Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Fichier Excel", "*.xlsx"), ("Tous les fichiers", "*.*")],
+            initialfile=os.path.basename(current),
+            initialdir=os.path.dirname(current) or APP_DIR,
+        )
+        if chosen:
+            self._path_var.set(normalize_excel_path(chosen))
+
+    def _use_default(self) -> None:
+        self._path_var.set(default_excel_path())
+
+    def _open(self) -> None:
+        open_excel_file(self._path_var.get(), parent=self)
+
+    def _save(self) -> None:
+        raw = self._path_var.get().strip()
+        if not raw:
+            messagebox.showwarning("Chemin manquant", "Indiquez un chemin de fichier.", parent=self)
+            return
+        excel_path = normalize_excel_path(raw)
+        parent_dir = os.path.dirname(excel_path)
+        if parent_dir and not os.path.isdir(parent_dir):
+            if not messagebox.askyesno(
+                "Dossier inexistant",
+                f"Le dossier suivant n'existe pas :\n{parent_dir}\n\nLe créer ?",
+                parent=self,
+            ):
+                return
+            try:
+                os.makedirs(parent_dir, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror("Erreur", f"Impossible de créer le dossier :\n{exc}", parent=self)
+                return
+        self._on_save(excel_path)
+        self.destroy()
 
 # ─── MANAGE PROJECTS DIALOG ────────────────────────────────────────────────────
 
@@ -590,10 +810,12 @@ class ManageProjectsDialog(tk.Toplevel):
         parent: tk.Misc,
         projects: list[ProjectEntry],
         sort_mode: SortMode,
+        excel_file: str,
         on_close,
     ):
         super().__init__(parent)
         self.projects: list[ProjectEntry] = list(projects)
+        self.excel_file = excel_file
         self.sort_mode = tk.StringVar(value=SORT_LABELS[sort_mode])
         names = project_names(sort_projects(self.projects, sort_mode))
         self.selected_name = tk.StringVar(value=names[0] if names else "")
@@ -746,7 +968,7 @@ class ManageProjectsDialog(tk.Toplevel):
         old_entry["name"] = new_name
         self.selected_name.set(new_name)
         self._refresh_picker()
-        rename_project_in_excel(old_name, new_name)
+        rename_project_in_excel(old_name, new_name, self.excel_file)
 
     def _delete(self):
         name = self._require_selection()
@@ -781,7 +1003,11 @@ class ManageProjectsDialog(tk.Toplevel):
 
     def destroy(self):
         self.project_picker.close_if_open()
-        save_config(self.projects, self._current_sort_mode())
+        save_config({
+            "projects": self.projects,
+            "sort_mode": self._current_sort_mode(),
+            "excel_file": self.excel_file,
+        })
         self.on_close(self.projects, self._current_sort_mode())
         self.grab_release()
         super().destroy()
@@ -792,14 +1018,15 @@ class TimeTrackerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("⏱ Time Tracker")
-        self.root.minsize(220, 320)
-        self.root.geometry("220x320")
+        self.root.minsize(240, 370)
+        self.root.geometry("240x370")
         self.root.resizable(True, True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.98)
 
         config = load_config()
         self.projects: list[ProjectEntry] = config["projects"]
+        self.excel_file: str = config["excel_file"]
         self.sort_mode = tk.StringVar(value=SORT_LABELS[config["sort_mode"]])
         names = project_names(sort_projects(self.projects, config["sort_mode"]))
         self.selected_project = tk.StringVar(value=names[0] if names else "")
@@ -927,12 +1154,21 @@ class TimeTrackerApp:
         )
         self.stop_btn.pack(side="left", fill="x", expand=True)
 
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 8))
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 10))
 
-        tk.Button(body, text="📊  Ouvrir le fichier Excel", bg=BG, fg=MUTED,
-                  font=("Segoe UI", 8), bd=0, cursor="hand2",
-                  activebackground=BG, activeforeground=ACCENT,
-                  command=self._open_excel).pack()
+        excel_footer = tk.Frame(body, bg=BG)
+        excel_footer.pack(fill="x", pady=(0, 6))
+
+        def excel_link(parent: tk.Frame, text: str, command) -> None:
+            tk.Button(
+                parent, text=text, bg=BG, fg=MUTED,
+                font=("Segoe UI", 8), bd=0, cursor="hand2",
+                activebackground=BG, activeforeground=ACCENT,
+                anchor="w", command=command,
+            ).pack(fill="x", anchor="w", pady=(0, 4))
+
+        excel_link(excel_footer, "📊  Ouvrir Excel", self._open_excel)
+        excel_link(excel_footer, "📁  Changer l'emplacement…", self._open_excel_settings)
 
     def _current_sort_mode(self) -> SortMode:
         label = self.sort_mode.get()
@@ -953,7 +1189,14 @@ class TimeTrackerApp:
         else:
             self.selected_project.set("")
         if persist_sort:
-            save_config(self.projects, self._current_sort_mode())
+            self._save_config()
+
+    def _save_config(self) -> None:
+        save_config({
+            "projects": self.projects,
+            "sort_mode": self._current_sort_mode(),
+            "excel_file": self.excel_file,
+        })
 
     def _on_sort_changed(self, _event=None) -> None:
         self._refresh_project_list(persist_sort=True)
@@ -1013,12 +1256,12 @@ class TimeTrackerApp:
             "Notes (optionnel)", "Ajouter une note pour cette session :",
             parent=self.root) or ""
 
-        log_session(project, self.start_time, end_time, notes)
+        log_session(project, self.start_time, end_time, notes, self.excel_file)
 
         dur = int(self.elapsed)
         h, m = dur // 3600, (dur % 3600) // 60
         messagebox.showinfo("Session enregistrée",
-                            f"✔ {project}\nDurée : {h}h {m:02}min\n\nEnregistré dans :\n{EXCEL_FILE}")
+                            f"✔ {project}\nDurée : {h}h {m:02}min\n\nEnregistré dans :\n{self.excel_file}")
         self.timer_label.config(text="00:00:00")
         self.status_label.config(text="● En attente", fg=self._MUTED)
 
@@ -1028,6 +1271,7 @@ class TimeTrackerApp:
             self.root,
             self.projects,
             self._current_sort_mode(),
+            self.excel_file,
             self._on_projects_updated,
         )
 
@@ -1037,27 +1281,29 @@ class TimeTrackerApp:
         self._refresh_project_list(persist_sort=True)
 
     # ── Excel ──
-    def _open_excel(self):
-        ensure_excel()
-        if os.name == "nt":
-            os.startfile(EXCEL_FILE)
-        else:
-            try:
-                sysname = os.uname().sysname
-            except AttributeError:
-                sysname = ""
-            if sysname == "Darwin":
-                os.system(f'open "{EXCEL_FILE}"')
-            else:
-                os.system(f'xdg-open "{EXCEL_FILE}"')
+    def _open_excel_settings(self) -> None:
+        ExcelFileDialog(self.root, self.excel_file, self._on_excel_file_changed)
+
+    def _on_excel_file_changed(self, excel_path: str) -> None:
+        self.excel_file = excel_path
+        self._save_config()
+        ensure_excel(self.excel_file)
+        messagebox.showinfo(
+            "Fichier Excel",
+            f"Les sessions seront enregistrées dans :\n{self.excel_file}",
+            parent=self.root,
+        )
+
+    def _open_excel(self) -> None:
+        open_excel_file(self.excel_file, parent=self.root)
 
 # ─── ENTRY ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     ensure_installed()
-    ensure_excel()
     startup_config = load_config()
-    save_config(startup_config["projects"], startup_config["sort_mode"])
+    ensure_excel(startup_config["excel_file"])
+    save_config(startup_config)
     root = tk.Tk()
     app  = TimeTrackerApp(root)
     root.mainloop()
