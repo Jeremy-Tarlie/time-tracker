@@ -63,8 +63,6 @@ En mode développement, les données (`heures_projet.xlsx`, `projects.json`) son
 ### Compilation locale (Windows)
 
 ```bash
-# Double-clic sur build_and_install.bat
-# ou :
 pip install -r requirements.txt pyinstaller
 pyinstaller --onefile --windowed --name TimeTracker --clean main.py
 ```
@@ -107,7 +105,6 @@ time-tracker/
 │   ├── dialogs.py                  # Fenêtres modales
 │   └── app.py                      # Fenêtre principale
 ├── requirements.txt
-├── build_and_install.bat           # Build local Windows
 ├── LICENSE
 ├── README.md
 └── .github/workflows/release.yml
