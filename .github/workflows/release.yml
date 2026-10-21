@@ -1,0 +1,154 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      should_release: ${{ steps.meta.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read APP_VERSION and decide
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(python3 -c "import re; print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', open('time_tracker/constants.py', encoding='utf-8').read()).group(1))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected APP_VERSION=$VERSION"
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists — skip build."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for v${VERSION} — will build and publish."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (${{ matrix.artifact }})
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: TimeTracker-windows-x64.exe
+            binary: TimeTracker.exe
+          - os: ubuntu-latest
+            artifact: TimeTracker-linux-x64
+            binary: TimeTracker
+          - os: macos-latest
+            artifact: TimeTracker-macos-arm64
+            binary: TimeTracker
+          - os: macos-13
+            artifact: TimeTracker-macos-x64
+            binary: TimeTracker
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux tkinter
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller (Windows / macOS)
+        if: runner.os != 'Linux'
+        run: pyinstaller --onefile --windowed --name TimeTracker --clean main.py
+
+      - name: Build with PyInstaller (Linux)
+        if: runner.os == 'Linux'
+        run: pyinstaller --onefile --name TimeTracker --clean main.py
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p release
+          if [ -f "dist/${{ matrix.binary }}" ]; then
+            cp "dist/${{ matrix.binary }}" "release/${{ matrix.artifact }}"
+          else
+            echo "Built binary not found: dist/${{ matrix.binary }}"
+            ls -la dist || true
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p dist-release
+          find artifacts -type f -exec cp {} dist-release/ \;
+          ls -la dist-release
+
+      - name: Create release v${{ needs.check-version.outputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          gh release create "v${VERSION}" dist-release/* \
+            --title "Time Tracker v${VERSION}" \
+            --notes "$(cat <<EOF
+          ## Time Tracker v${VERSION}
+
+          Binaires multi-plateformes :
+
+          | Fichier | Plateforme |
+          |---------|------------|
+          | \`TimeTracker-windows-x64.exe\` | Windows 64-bit |
+          | \`TimeTracker-linux-x64\` | Linux 64-bit |
+          | \`TimeTracker-macos-arm64\` | macOS Apple Silicon |
+          | \`TimeTracker-macos-x64\` | macOS Intel |
+
+          ### Windows
+          Téléchargez \`TimeTracker-windows-x64.exe\`, lancez-le une fois : installation automatique (raccourcis, démarrage).
+
+          ### Linux / macOS
+          Rendez le binaire exécutable puis lancez-le :
+          \`\`\`bash
+          chmod +x TimeTracker-linux-x64   # ou TimeTracker-macos-*
+          ./TimeTracker-linux-x64
+          \`\`\`
+          EOF
+          )"
