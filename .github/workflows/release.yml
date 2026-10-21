@@ -48,11 +48,10 @@ jobs:
           - os: ubuntu-latest
             artifact: TimeTracker-linux-x64
             binary: TimeTracker
+          # macos-latest = Apple Silicon (M1/M2/M3). macos-13 (Intel) retiré :
+          # files d'attente runners trop longues, bloquaient toute la release.
           - os: macos-latest
             artifact: TimeTracker-macos-arm64
-            binary: TimeTracker
-          - os: macos-13
-            artifact: TimeTracker-macos-x64
             binary: TimeTracker
     runs-on: ${{ matrix.os }}
     steps:
@@ -138,8 +137,7 @@ jobs:
           |---------|------------|
           | \`TimeTracker-windows-x64.exe\` | Windows 64-bit |
           | \`TimeTracker-linux-x64\` | Linux 64-bit |
-          | \`TimeTracker-macos-arm64\` | macOS Apple Silicon |
-          | \`TimeTracker-macos-x64\` | macOS Intel |
+          | \`TimeTracker-macos-arm64\` | macOS Apple Silicon (M1/M2/M3) |
 
           ### Windows
           Téléchargez \`TimeTracker-windows-x64.exe\`, lancez-le une fois : installation automatique (raccourcis, démarrage).
@@ -147,8 +145,10 @@ jobs:
           ### Linux / macOS
           Rendez le binaire exécutable puis lancez-le :
           \`\`\`bash
-          chmod +x TimeTracker-linux-x64   # ou TimeTracker-macos-*
-          ./TimeTracker-linux-x64
+          chmod +x TimeTracker-macos-arm64   # ou TimeTracker-linux-x64
+          ./TimeTracker-macos-arm64
           \`\`\`
+
+          > macOS Intel : non fourni (runners CI trop lents). Utilisez un Mac Apple Silicon, ou lancez depuis les sources.
           EOF
           )"
