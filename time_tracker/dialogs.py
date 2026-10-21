@@ -12,7 +12,7 @@ from time_tracker.constants import (
     ProjectEntry,
     SortMode,
 )
-from time_tracker.excel import open_excel_file, rename_project_in_excel
+from time_tracker.excel import ExcelWriteError, open_excel_file, rename_project_in_excel
 from time_tracker.paths import APP_DIR, default_excel_path, normalize_excel_path
 from time_tracker.widgets import SearchableDropdown
 
@@ -331,10 +331,19 @@ class ManageProjectsDialog(tk.Toplevel):
         if any(entry["name"] == new_name for entry in self.projects):
             messagebox.showwarning("Doublon", f"« {new_name} » existe déjà.", parent=self)
             return
+        try:
+            rename_project_in_excel(old_name, new_name, self.excel_file)
+        except ExcelWriteError as exc:
+            messagebox.showerror(
+                "Renommage Excel impossible",
+                f"Le projet n'a pas été renommé dans Excel.\n"
+                f"La liste locale n'a pas été modifiée.\n\n{exc}",
+                parent=self,
+            )
+            return
         old_entry["name"] = new_name
         self.selected_name.set(new_name)
         self._refresh_picker()
-        rename_project_in_excel(old_name, new_name, self.excel_file)
 
     def _delete(self) -> None:
         name = self._require_selection()

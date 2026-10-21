@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox
@@ -10,6 +11,10 @@ from openpyxl.workbook.workbook import Workbook as WorkbookType
 from openpyxl.worksheet.worksheet import Worksheet
 
 from time_tracker.paths import normalize_excel_path
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+# Espaces / contrôles souvent utilisés pour contourner un check sur le 1er caractère.
+_FORMULA_LEADING_STRIP = "\t\r\n \ufeff\u200b\u200c\u200d\u2060\u00a0"
 
 HEADER_FILL = PatternFill("solid", fgColor="2D6A4F")
 SUBHEAD_FILL = PatternFill("solid", fgColor="40916C")
@@ -44,6 +49,20 @@ def format_session_duration(seconds: float) -> str:
     if minutes > 0:
         return f"{minutes}min {secs:02}s"
     return f"{secs}s"
+
+
+def sanitize_excel_text(value: str) -> str:
+    """Empêche l'injection de formules Excel (=, +, -, @) dans les cellules texte.
+
+    Retire d'abord tab/BOM/ZWSP/espaces en tête (contournements CSV/Excel),
+    puis préfixe d'une apostrophe si le texte utile commence par un déclencheur.
+    """
+    if not value:
+        return value
+    cleaned = value.lstrip(_FORMULA_LEADING_STRIP)
+    if cleaned and cleaned[0] in _FORMULA_PREFIXES:
+        return f"'{cleaned}"
+    return value
 
 
 def _row_has_data(values: tuple[object, ...]) -> bool:
@@ -221,8 +240,6 @@ def log_session(
     _assert_excel_writable(excel_path)
     try:
         wb = load_workbook(excel_path)
-    except ExcelWriteError:
-        raise
     except Exception as exc:
         raise ExcelWriteError(
             "Impossible d'ouvrir le fichier Excel pour y écrire la session.\n\n"
@@ -247,12 +264,12 @@ def log_session(
     fill = ALT_FILL if row_idx % 2 == 0 else WHITE_FILL
     values: list[str | float] = [
         start_dt.strftime("%d/%m/%Y"),
-        project,
+        sanitize_excel_text(project),
         start_dt.strftime("%H:%M"),
         end_dt.strftime("%H:%M"),
         round(duration_h, 4),
         round(duration_min, 1),
-        notes,
+        sanitize_excel_text(notes),
     ]
     for col, val in enumerate(values, 1):
         cell = ws.cell(row=row_idx, column=col, value=val)
@@ -274,12 +291,29 @@ def rename_project_in_excel(old_name: str, new_name: str, excel_path: str) -> No
     if not os.path.exists(excel_path):
         return
     _assert_excel_writable(excel_path)
-    wb = load_workbook(excel_path)
-    ws = wb["Sessions"]
+    try:
+        wb = load_workbook(excel_path)
+    except Exception as exc:
+        raise ExcelWriteError(
+            "Impossible d'ouvrir le fichier Excel pour renommer le projet.\n\n"
+            f"{exc}\n\n{EXCEL_WRITE_HINT}"
+        ) from exc
+    try:
+        ws = wb["Sessions"]
+    except KeyError as exc:
+        raise ExcelWriteError(
+            "Le fichier Excel ne contient pas la feuille « Sessions »."
+        ) from exc
+    safe_new = sanitize_excel_text(new_name)
     for row in ws.iter_rows(min_row=2):
-        if row[1].value == old_name:
-            row[1].value = new_name
-    _refresh_summary(wb)
+        if row[1].value == old_name or row[1].value == sanitize_excel_text(old_name):
+            row[1].value = safe_new
+    try:
+        _refresh_summary(wb)
+    except KeyError as exc:
+        raise ExcelWriteError(
+            "Le fichier Excel ne contient pas la feuille « Résumé par projet »."
+        ) from exc
     _save_workbook_atomic(wb, excel_path)
 
 
@@ -305,13 +339,16 @@ def _refresh_summary(wb: WorkbookType) -> None:
             _clear_summary_row(ws2, i)
     for i, (project, data) in enumerate(sorted_projects, start=3):
         fill2 = ALT_FILL if i % 2 == 0 else WHITE_FILL
-        values: list[str | float] = [project, round(data["h"], 2), int(data["n"])]
+        safe_project = sanitize_excel_text(str(project))
+        values: list[str | float] = [safe_project, round(data["h"], 2), int(data["n"])]
         for col, val in enumerate(values, 1):
             cell = ws2.cell(row=i, column=col, value=val)
             cell.font = Font(name="Calibri", size=10)
             cell.fill = fill2
             cell.border = thin_border()
             cell.alignment = Alignment(horizontal="center" if col != 1 else "left")
+            if col == 1 and isinstance(val, str):
+                cell.data_type = "s"
         ws2.cell(row=i, column=2).number_format = "0.00"
 
 
@@ -338,10 +375,8 @@ def open_excel_file(excel_path: str, *, parent: tk.Misc | None = None) -> bool:
                 sysname = os.uname().sysname
             except AttributeError:
                 sysname = ""
-            if sysname == "Darwin":
-                os.system(f'open "{path}"')
-            else:
-                os.system(f'xdg-open "{path}"')
+            opener = ["open", path] if sysname == "Darwin" else ["xdg-open", path]
+            subprocess.run(opener, check=False)
     except OSError as exc:
         messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{exc}", parent=parent)
         return False

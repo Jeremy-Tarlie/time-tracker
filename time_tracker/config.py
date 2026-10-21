@@ -38,52 +38,60 @@ def _migrate_legacy_projects(raw: list[str]) -> list[ProjectEntry]:
     ]
 
 
-def load_config() -> ProjectsConfig:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
-            raw: object = json.load(handle)
-        if isinstance(raw, list):
-            legacy = [str(item) for item in raw]
-            return {
-                "projects": _migrate_legacy_projects(legacy),
-                "sort_mode": DEFAULT_SORT,
-                "excel_file": default_excel_path(),
-            }
-        if not isinstance(raw, dict):
-            return {
-                "projects": _default_projects(),
-                "sort_mode": DEFAULT_SORT,
-                "excel_file": default_excel_path(),
-            }
-        projects_raw = raw.get("projects", _default_projects())
-        normalized: list[ProjectEntry] = []
-        if isinstance(projects_raw, list):
-            for item in projects_raw:
-                if isinstance(item, str):
-                    normalized.append({
-                        "name": item,
-                        "created": datetime.now().isoformat(timespec="seconds"),
-                    })
-                elif isinstance(item, dict):
-                    normalized.append({
-                        "name": str(item["name"]),
-                        "created": str(
-                            item.get("created", datetime.now().isoformat(timespec="seconds"))
-                        ),
-                    })
-        excel_raw = raw.get("excel_file")
-        excel_file = (
-            normalize_excel_path(str(excel_raw)) if excel_raw else default_excel_path()
-        )
-        return {
-            "projects": normalized if normalized else _default_projects(),
-            "sort_mode": _normalize_sort_mode(str(raw.get("sort_mode", DEFAULT_SORT))),
-            "excel_file": excel_file,
-        }
+def _fallback_config() -> ProjectsConfig:
     return {
         "projects": _default_projects(),
         "sort_mode": DEFAULT_SORT,
         "excel_file": default_excel_path(),
+    }
+
+
+def load_config() -> ProjectsConfig:
+    if not os.path.exists(CONFIG_FILE):
+        return _fallback_config()
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+            raw: object = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return _fallback_config()
+
+    if isinstance(raw, list):
+        legacy = [str(item) for item in raw if str(item).strip()]
+        return {
+            "projects": _migrate_legacy_projects(legacy) if legacy else _default_projects(),
+            "sort_mode": DEFAULT_SORT,
+            "excel_file": default_excel_path(),
+        }
+    if not isinstance(raw, dict):
+        return _fallback_config()
+
+    projects_raw = raw.get("projects", _default_projects())
+    normalized: list[ProjectEntry] = []
+    if isinstance(projects_raw, list):
+        for item in projects_raw:
+            if isinstance(item, str) and item.strip():
+                normalized.append({
+                    "name": item.strip(),
+                    "created": datetime.now().isoformat(timespec="seconds"),
+                })
+            elif isinstance(item, dict) and "name" in item:
+                name = str(item["name"]).strip()
+                if not name:
+                    continue
+                normalized.append({
+                    "name": name,
+                    "created": str(
+                        item.get("created", datetime.now().isoformat(timespec="seconds"))
+                    ),
+                })
+    excel_raw = raw.get("excel_file")
+    excel_file = (
+        normalize_excel_path(str(excel_raw)) if excel_raw else default_excel_path()
+    )
+    return {
+        "projects": normalized if normalized else _default_projects(),
+        "sort_mode": _normalize_sort_mode(str(raw.get("sort_mode", DEFAULT_SORT))),
+        "excel_file": excel_file,
     }
 
 
