@@ -32,13 +32,258 @@ SORT_OPTIONS: list[tuple[str, SortMode]] = [
     ("Date ↓", "date_desc"),
 ]
 SORT_LABELS: dict[SortMode, str] = {mode: label for label, mode in SORT_OPTIONS}
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 INSTALL_DIR   = os.path.join(os.environ.get("LOCALAPPDATA", ""), "TimeTracker")
 INSTALL_EXE   = os.path.join(INSTALL_DIR, "TimeTracker.exe")
 REGISTRY_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REGISTRY_NAME = "TimeTracker"
 APP_NAME      = "Time Tracker"
+
+class ThemeColors(TypedDict):
+    bg: str
+    surface: str
+    border: str
+    green: str
+    green_dark: str
+    green_soft: str
+    timer: str
+    text: str
+    muted: str
+    danger: str
+    danger_soft: str
+    danger_hover: str
+    white: str
+
+THEME: ThemeColors = {
+    "bg": "#FFFFFF",
+    "surface": "#F7F9F8",
+    "border": "#DCE5E1",
+    "green": "#40916C",
+    "green_dark": "#2D6A4F",
+    "green_soft": "#D8F3DC",
+    "timer": "#1B4332",
+    "text": "#1A1A1A",
+    "muted": "#5C6B66",
+    "danger": "#E63946",
+    "danger_soft": "#FDECEE",
+    "danger_hover": "#C1121F",
+    "white": "#FFFFFF",
+}
+
+THEME_REQUIRED_KEYS: tuple[str, ...] = (
+    "bg", "surface", "border", "green", "green_dark", "green_soft",
+    "timer", "text", "muted", "danger", "danger_soft", "danger_hover", "white",
+)
+
+_BUTTON_HOVER_NORMAL: dict[int, str] = {}
+_BUTTON_HOVER_ACTIVE: dict[int, str] = {}
+
+def _bind_button_hover(button: tk.Button, *, normal_bg: str, hover_bg: str) -> None:
+    key = id(button)
+    _BUTTON_HOVER_NORMAL[key] = normal_bg
+    _BUTTON_HOVER_ACTIVE[key] = hover_bg
+
+    def on_enter(_event: tk.Event) -> None:
+        if str(button.cget("state")) == "disabled":
+            return
+        button.configure(bg=_BUTTON_HOVER_ACTIVE[key])
+
+    def on_leave(_event: tk.Event) -> None:
+        # Toujours restaurer la couleur « normale » (y compris si disabled entre Enter et Leave).
+        button.configure(bg=_BUTTON_HOVER_NORMAL[key])
+
+    button.bind("<Enter>", on_enter)
+    button.bind("<Leave>", on_leave)
+
+def set_button_palette(
+    button: tk.Button,
+    *,
+    bg: str,
+    fg: str,
+    hover_bg: str,
+    state: str | None = None,
+) -> None:
+    kwargs: dict[str, str] = {
+        "bg": bg,
+        "fg": fg,
+        "activebackground": hover_bg,
+        "activeforeground": fg,
+    }
+    if state is not None:
+        kwargs["state"] = state
+    button.configure(**kwargs)
+    _BUTTON_HOVER_NORMAL[id(button)] = bg
+    _BUTTON_HOVER_ACTIVE[id(button)] = hover_bg
+
+def make_header(parent: tk.Misc, title: str) -> tk.Frame:
+    hdr = tk.Frame(parent, bg=THEME["green_dark"], height=38)
+    hdr.pack(fill="x")
+    hdr.pack_propagate(False)
+    tk.Label(
+        hdr,
+        text=title,
+        bg=THEME["green_dark"],
+        fg=THEME["white"],
+        font=("Segoe UI", 11, "bold"),
+    ).pack(side="left", padx=14, pady=8)
+    return hdr
+
+def primary_button(
+    parent: tk.Misc,
+    text: str,
+    command: Callable[[], None],
+    *,
+    padx: int = 12,
+    pady: int = 7,
+    font: tuple[str, int, str] = ("Segoe UI", 9, "bold"),
+) -> tk.Button:
+    btn = tk.Button(
+        parent,
+        text=text,
+        bg=THEME["green"],
+        fg=THEME["white"],
+        font=font,
+        bd=0,
+        cursor="hand2",
+        padx=padx,
+        pady=pady,
+        activebackground=THEME["green_dark"],
+        activeforeground=THEME["white"],
+        disabledforeground=THEME["muted"],
+        relief="flat",
+        highlightthickness=0,
+        command=command,
+    )
+    _bind_button_hover(btn, normal_bg=THEME["green"], hover_bg=THEME["green_dark"])
+    return btn
+
+def secondary_button(
+    parent: tk.Misc,
+    text: str,
+    command: Callable[[], None],
+    *,
+    padx: int = 10,
+    pady: int = 6,
+) -> tk.Button:
+    btn = tk.Button(
+        parent,
+        text=text,
+        bg=THEME["surface"],
+        fg=THEME["text"],
+        font=("Segoe UI", 9),
+        bd=0,
+        cursor="hand2",
+        padx=padx,
+        pady=pady,
+        activebackground=THEME["green_soft"],
+        activeforeground=THEME["green_dark"],
+        relief="flat",
+        highlightthickness=0,
+        command=command,
+    )
+    _bind_button_hover(btn, normal_bg=THEME["surface"], hover_bg=THEME["green_soft"])
+    return btn
+
+def ghost_button(
+    parent: tk.Misc,
+    text: str,
+    command: Callable[[], None],
+    *,
+    fg: str | None = None,
+    font: tuple[str, int] | tuple[str, int, str] = ("Segoe UI", 8),
+    underline: bool = False,
+) -> tk.Button:
+    color = fg if fg is not None else THEME["muted"]
+    resolved_font: tuple[str, int] | tuple[str, int, str]
+    if underline and len(font) == 2:
+        resolved_font = (font[0], font[1], "underline")
+    else:
+        resolved_font = font
+    btn = tk.Button(
+        parent,
+        text=text,
+        bg=THEME["bg"],
+        fg=color,
+        font=resolved_font,
+        bd=0,
+        cursor="hand2",
+        activebackground=THEME["green_soft"],
+        activeforeground=THEME["green_dark"],
+        relief="flat",
+        highlightthickness=0,
+        anchor="w",
+        command=command,
+    )
+    _bind_button_hover(btn, normal_bg=THEME["bg"], hover_bg=THEME["green_soft"])
+    return btn
+
+def danger_button(
+    parent: tk.Misc,
+    text: str,
+    command: Callable[[], None],
+    *,
+    padx: int = 10,
+    pady: int = 6,
+) -> tk.Button:
+    btn = tk.Button(
+        parent,
+        text=text,
+        bg=THEME["danger"],
+        fg=THEME["white"],
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        cursor="hand2",
+        padx=padx,
+        pady=pady,
+        activebackground=THEME["danger_hover"],
+        activeforeground=THEME["white"],
+        relief="flat",
+        highlightthickness=0,
+        command=command,
+    )
+    _bind_button_hover(btn, normal_bg=THEME["danger"], hover_bg=THEME["danger_hover"])
+    return btn
+
+def themed_entry(parent: tk.Misc, textvariable: tk.StringVar, *, font: tuple[str, int] = ("Segoe UI", 9)) -> tk.Entry:
+    return tk.Entry(
+        parent,
+        textvariable=textvariable,
+        font=font,
+        bg=THEME["surface"],
+        fg=THEME["text"],
+        relief="flat",
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=THEME["border"],
+        highlightcolor=THEME["green"],
+        insertbackground=THEME["text"],
+    )
+
+_SORT_COMBO_STYLE: str | None = None
+
+def configure_sort_combobox_style() -> str:
+    global _SORT_COMBO_STYLE
+    if _SORT_COMBO_STYLE is not None:
+        return _SORT_COMBO_STYLE
+    style = ttk.Style()
+    style.theme_use("default")
+    style_name = "Theme.TCombobox"
+    style.configure(
+        style_name,
+        fieldbackground=THEME["surface"],
+        background=THEME["surface"],
+        foreground=THEME["text"],
+        selectbackground=THEME["green"],
+        selectforeground=THEME["white"],
+        arrowcolor=THEME["green_dark"],
+        bordercolor=THEME["border"],
+        lightcolor=THEME["border"],
+        darkcolor=THEME["border"],
+    )
+    style.map(style_name, fieldbackground=[("readonly", THEME["surface"])])
+    _SORT_COMBO_STYLE = style_name
+    return style_name
 
 def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
@@ -242,6 +487,18 @@ def sort_projects(projects: list[ProjectEntry], mode: SortMode) -> list[ProjectE
 def project_names(projects: list[ProjectEntry]) -> list[str]:
     return [entry["name"] for entry in projects]
 
+def format_session_duration(seconds: float) -> str:
+    """Affiche h/min/s sans tronquer les sessions courtes (ex. 5s → « 5s », pas « 0h 00min »)."""
+    total = max(0, int(round(seconds)))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours}h {minutes:02}min {secs:02}s"
+    if minutes > 0:
+        return f"{minutes}min {secs:02}s"
+    return f"{secs}s"
+
 class SearchableDropdown(tk.Frame):
     """Select avec recherche integree dans le panneau deroulant."""
 
@@ -259,6 +516,7 @@ class SearchableDropdown(tk.Frame):
         accent: str,
         highlight: str,
         text: str,
+        hover_bg: str,
         empty_label: str = "Aucun projet",
         placeholder: str = "Choisir un projet…",
     ) -> None:
@@ -271,6 +529,7 @@ class SearchableDropdown(tk.Frame):
         self._accent = accent
         self._highlight = highlight
         self._text = text
+        self._hover_bg = hover_bg
         self._empty_label = empty_label
         self._placeholder = placeholder
         self._items: list[str] = []
@@ -301,9 +560,25 @@ class SearchableDropdown(tk.Frame):
 
         for widget in (self.trigger, self.value_label, caret):
             widget.bind("<Button-1>", self._toggle)
+            widget.bind("<Enter>", self._on_trigger_enter)
+            widget.bind("<Leave>", self._on_trigger_leave)
 
         self.variable.trace_add("write", lambda *_: self._update_display())
         self._update_display()
+
+    def _on_trigger_enter(self, _event: tk.Event) -> None:
+        if not self._open:
+            self._set_trigger_bg(self._hover_bg)
+
+    def _on_trigger_leave(self, _event: tk.Event) -> None:
+        if not self._open:
+            self._set_trigger_bg(self._field_bg)
+
+    def _set_trigger_bg(self, color: str) -> None:
+        self.trigger.configure(bg=color)
+        for child in self.trigger.winfo_children():
+            if isinstance(child, tk.Label):
+                child.configure(bg=color)
 
     def _update_display(self) -> None:
         value = self.variable.get().strip()
@@ -496,6 +771,7 @@ class SearchableDropdown(tk.Frame):
         self._listbox = None
         self._open = False
         self._outside_click_armed = False
+        self._set_trigger_bg(self._field_bg)
 
 # ─── EXCEL ─────────────────────────────────────────────────────────────────────
 
@@ -508,8 +784,21 @@ def thin_border():
     s = Side(style="thin", color="B7E4C7")
     return Border(left=s, right=s, top=s, bottom=s)
 
+class ExcelWriteError(Exception):
+    """Fichier Excel inaccessible en écriture (ouvert ailleurs, verrouillé, etc.)."""
+
+EXCEL_WRITE_HINT = (
+    "Fermez le fichier Excel/Calc, enregistrez vos modifications, puis réessayez."
+)
+
+OOXML_ZIP_MAGIC = b"PK"
+OLE_CFBF_MAGIC = b"\xd0\xcf\x11\xe0"
+
 def _row_has_data(values: tuple[object, ...]) -> bool:
     return any(value is not None and str(value).strip() != "" for value in values)
+
+def _session_row_values(ws, row_idx: int) -> tuple[object, ...]:
+    return tuple(ws.cell(row=row_idx, column=col).value for col in range(1, 8))
 
 def _last_row_with_data(ws, *, min_row: int = 2) -> int:
     """Dernière ligne contenant des données (openpyxl.max_row peut être incorrect après édition manuelle)."""
@@ -520,8 +809,94 @@ def _last_row_with_data(ws, *, min_row: int = 2) -> int:
     return last
 
 def _next_session_row(ws) -> int:
+    """Prochaine ligne vide après la dernière session (ne jamais écraser une ligne remplie)."""
     last = _last_row_with_data(ws, min_row=2)
-    return max(last + 1, 2)
+    nr = max(last + 1, 2)
+    while _row_has_data(_session_row_values(ws, nr)):
+        nr += 1
+    return nr
+
+def _excel_lock_paths(excel_path: str) -> list[str]:
+    directory, filename = os.path.split(excel_path)
+    return [
+        os.path.join(directory, f"~${filename}"),           # Microsoft Excel
+        os.path.join(directory, f".~lock.{filename}#"),     # LibreOffice / OpenOffice
+    ]
+
+def _assert_excel_ooxml(excel_path: str) -> None:
+    """Refuse les faux .xlsx (ex. classeur OLE renommé / enregistré par Calc)."""
+    if not os.path.exists(excel_path):
+        return
+    try:
+        with open(excel_path, "rb") as handle:
+            magic = handle.read(8)
+    except OSError as exc:
+        raise ExcelWriteError(
+            f"Impossible de lire le fichier Excel :\n{exc}\n\n{EXCEL_WRITE_HINT}"
+        ) from exc
+    if magic.startswith(OOXML_ZIP_MAGIC):
+        return
+    if magic.startswith(OLE_CFBF_MAGIC):
+        raise ExcelWriteError(
+            "Le fichier n'est pas un vrai .xlsx (format Excel ancien / LibreOffice).\n\n"
+            "Dans Calc : Fichier → Enregistrer sous → "
+            "« Classeur Excel 2007-365 (.xlsx) ».\n"
+            "Ou choisissez un nouvel emplacement dans Time Tracker."
+        )
+    raise ExcelWriteError(
+        "Le fichier Excel est illisible ou corrompu.\n\n"
+        "Choisissez un nouvel emplacement via « Changer l'emplacement… », "
+        "ou réparez le fichier dans Calc."
+    )
+
+def _assert_excel_writable(excel_path: str) -> None:
+    for lock_path in _excel_lock_paths(excel_path):
+        if os.path.exists(lock_path):
+            raise ExcelWriteError(
+                f"Le fichier Excel semble ouvert dans une autre application.\n\n{EXCEL_WRITE_HINT}"
+            )
+    if not os.path.exists(excel_path):
+        return
+    _assert_excel_ooxml(excel_path)
+    try:
+        with open(excel_path, "r+b"):
+            pass
+    except PermissionError as exc:
+        raise ExcelWriteError(
+            f"Impossible d'écrire dans le fichier Excel.\n\n{EXCEL_WRITE_HINT}"
+        ) from exc
+    except OSError as exc:
+        raise ExcelWriteError(
+            f"Impossible d'accéder au fichier Excel :\n{exc}\n\n{EXCEL_WRITE_HINT}"
+        ) from exc
+
+def _save_workbook_atomic(wb, excel_path: str) -> None:
+    _assert_excel_writable(excel_path)
+    parent_dir = os.path.dirname(excel_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    tmp_path = f"{excel_path}.tmp"
+    try:
+        wb.save(tmp_path)
+        os.replace(tmp_path, excel_path)
+    except PermissionError as exc:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise ExcelWriteError(
+            f"Impossible d'enregistrer le fichier Excel.\n\n{EXCEL_WRITE_HINT}"
+        ) from exc
+    except OSError as exc:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise ExcelWriteError(
+            f"Impossible d'enregistrer le fichier Excel :\n{exc}\n\n{EXCEL_WRITE_HINT}"
+        ) from exc
 
 def _clear_summary_row(ws2, row_idx: int) -> None:
     for col in range(1, 4):
@@ -567,15 +942,37 @@ def ensure_excel(excel_path: str) -> None:
     ws2.column_dimensions["B"].width = 16
     ws2.column_dimensions["C"].width = 14
     ws2.freeze_panes = "A3"
-    wb.save(excel_path)
+    _save_workbook_atomic(wb, excel_path)
 
-def log_session(project: str, start_dt: datetime, end_dt: datetime, notes: str, excel_path: str) -> None:
+def log_session(project: str, start_dt: datetime, end_dt: datetime, notes: str, excel_path: str) -> int:
+    """Ajoute une session en append. Retourne le numéro de ligne écrite. Lève ExcelWriteError si lock."""
     ensure_excel(excel_path)
-    wb = load_workbook(excel_path)
-    ws = wb["Sessions"]
+    _assert_excel_writable(excel_path)
+    try:
+        wb = load_workbook(excel_path)
+    except ExcelWriteError:
+        raise
+    except Exception as exc:
+        raise ExcelWriteError(
+            "Impossible d'ouvrir le fichier Excel pour y écrire la session.\n\n"
+            f"{exc}\n\n"
+            "Vérifiez que le fichier est un vrai .xlsx et qu'il n'est pas ouvert ailleurs."
+        ) from exc
+    try:
+        ws = wb["Sessions"]
+    except KeyError as exc:
+        raise ExcelWriteError(
+            "Le fichier Excel ne contient pas la feuille « Sessions ».\n"
+            "Choisissez un autre fichier ou recréez-en un via « Changer l'emplacement… »."
+        ) from exc
     duration_h   = (end_dt - start_dt).total_seconds() / 3600
     duration_min = (end_dt - start_dt).total_seconds() / 60
     nr   = _next_session_row(ws)
+    if _row_has_data(_session_row_values(ws, nr)):
+        raise ExcelWriteError(
+            f"La ligne {nr} de la feuille Sessions n'est pas vide.\n"
+            "Aucune session n'a été écrasée."
+        )
     fill = ALT_FILL if nr % 2 == 0 else WHITE_FILL
     values = [
         start_dt.strftime("%d/%m/%Y"), project,
@@ -591,18 +988,20 @@ def log_session(project: str, start_dt: datetime, end_dt: datetime, notes: str, 
     ws.cell(row=nr, column=5).number_format = "0.00"
     ws.cell(row=nr, column=6).number_format = "0.0"
     _refresh_summary(wb)
-    wb.save(excel_path)
+    _save_workbook_atomic(wb, excel_path)
+    return nr
 
 def rename_project_in_excel(old_name: str, new_name: str, excel_path: str) -> None:
     if not os.path.exists(excel_path):
         return
+    _assert_excel_writable(excel_path)
     wb = load_workbook(excel_path)
     ws = wb["Sessions"]
     for row in ws.iter_rows(min_row=2):
         if row[1].value == old_name:
             row[1].value = new_name
     _refresh_summary(wb)
-    wb.save(excel_path)
+    _save_workbook_atomic(wb, excel_path)
 
 def _refresh_summary(wb):
     ws  = wb["Sessions"]
@@ -680,7 +1079,7 @@ class ExcelFileDialog(tk.Toplevel):
         self.minsize(360, 200)
         self.grab_set()
         self.attributes("-topmost", True)
-        self.configure(bg="#FFFFFF")
+        self.configure(bg=THEME["bg"])
         self._build()
         self.update_idletasks()
         px = parent.winfo_rootx()
@@ -688,76 +1087,42 @@ class ExcelFileDialog(tk.Toplevel):
         self.geometry(f"500x220+{px - 250}+{py}")
 
     def _build(self) -> None:
-        BG = "#FFFFFF"
-        ACCENT = "#40916C"
-        GREEN = "#52B788"
-        MUTED = "#888888"
-        BORDER = "#E0E0E0"
+        make_header(self, "Fichier Excel")
 
-        hdr = tk.Frame(self, bg=ACCENT, height=36)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text="📁  Fichier Excel", bg=ACCENT, fg="white",
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=12, pady=6)
-
-        body = tk.Frame(self, bg=BG, padx=16, pady=12)
+        body = tk.Frame(self, bg=THEME["bg"], padx=16, pady=14)
         body.pack(fill="both", expand=True)
 
         tk.Label(
             body,
-            text="Emplacement et nom du fichier d'export :",
-            bg=BG, fg=MUTED, font=("Segoe UI", 8, "bold"),
+            text="EMPLACEMENT DU FICHIER D'EXPORT",
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 7, "bold"),
         ).pack(anchor="w", pady=(0, 6))
 
-        path_row = tk.Frame(body, bg=BG)
+        path_row = tk.Frame(body, bg=THEME["bg"])
         path_row.pack(fill="x", pady=(0, 8))
-        self._path_entry = tk.Entry(
-            path_row, textvariable=self._path_var,
-            font=("Segoe UI", 9), bg="#F5F5F5", fg="#222222",
-            relief="flat", bd=0, highlightthickness=1,
-            highlightbackground=BORDER, highlightcolor=GREEN,
-        )
-        self._path_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
-        tk.Button(
-            path_row, text="Ouvrir", bg="#F0F0F0", fg="#444444", bd=0,
-            font=("Segoe UI", 9), cursor="hand2",
-            padx=10, pady=6, command=self._open,
-        ).pack(side="left", padx=(0, 6))
-        tk.Button(
-            path_row, text="Parcourir…", bg=GREEN, fg="white", bd=0,
-            font=("Segoe UI", 9, "bold"), cursor="hand2",
-            padx=10, pady=6, activebackground=ACCENT,
-            activeforeground="white", command=self._browse,
-        ).pack(side="left")
+        self._path_entry = themed_entry(path_row, self._path_var)
+        self._path_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 6))
+        secondary_button(path_row, "Ouvrir", self._open).pack(side="left", padx=(0, 6))
+        primary_button(path_row, "Parcourir…", self._browse, padx=10, pady=6).pack(side="left")
 
         tk.Label(
             body,
             text="Les nouvelles sessions seront enregistrées à cet emplacement.\n"
                  "L'ancien fichier n'est pas déplacé automatiquement.",
-            bg=BG, fg=MUTED, font=("Segoe UI", 8), justify="left",
-        ).pack(anchor="w", pady=(0, 10))
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 8),
+            justify="left",
+        ).pack(anchor="w", pady=(0, 12))
 
-        btn_row = tk.Frame(body, bg=BG)
+        btn_row = tk.Frame(body, bg=THEME["bg"])
         btn_row.pack(fill="x")
 
-        tk.Button(
-            btn_row, text="Par défaut", bg="#F0F0F0", fg="#444444", bd=0,
-            font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6,
-            command=self._use_default,
-        ).pack(side="left")
-
-        tk.Button(
-            btn_row, text="Annuler", bg="#F0F0F0", fg="#444444", bd=0,
-            font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6,
-            command=self.destroy,
-        ).pack(side="right", padx=(6, 0))
-
-        tk.Button(
-            btn_row, text="Enregistrer", bg=ACCENT, fg="white", bd=0,
-            font=("Segoe UI", 9, "bold"), cursor="hand2", padx=12, pady=6,
-            activebackground=GREEN, activeforeground="white",
-            command=self._save,
-        ).pack(side="right")
+        secondary_button(btn_row, "Par défaut", self._use_default).pack(side="left")
+        secondary_button(btn_row, "Annuler", self.destroy).pack(side="right", padx=(6, 0))
+        primary_button(btn_row, "Enregistrer", self._save).pack(side="right")
 
     def _browse(self) -> None:
         current = self._path_var.get().strip() or default_excel_path()
@@ -825,88 +1190,84 @@ class ManageProjectsDialog(tk.Toplevel):
         self.minsize(320, 320)
         self.grab_set()
         self.attributes("-topmost", True)
-        self.configure(bg="#FFFFFF")
+        self.configure(bg=THEME["bg"])
         self._build()
         self._refresh_picker()
         self.update_idletasks()
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
-        self.geometry(f"320x260+{px - 260}+{py}")
+        self.geometry(f"320x280+{px - 260}+{py}")
 
-    def _build(self):
-        BG     = "#FFFFFF"
-        ACCENT = "#40916C"
-        GREEN  = "#52B788"
-        RED    = "#E63946"
-        MUTED  = "#888888"
-        BORDER = "#E0E0E0"
+    def _build(self) -> None:
+        make_header(self, "Gérer les projets")
 
-        hdr = tk.Frame(self, bg=ACCENT, height=36)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text="✏  Gérer les projets", bg=ACCENT, fg="white",
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=12, pady=6)
-
-        body = tk.Frame(self, bg=BG, padx=16, pady=12)
+        body = tk.Frame(self, bg=THEME["bg"], padx=16, pady=14)
         body.pack(fill="both", expand=True)
 
-        top_row = tk.Frame(body, bg=BG)
+        top_row = tk.Frame(body, bg=THEME["bg"])
         top_row.pack(fill="x", pady=(0, 6))
-        tk.Label(top_row, text="Projet", bg=BG, fg=MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Label(
+            top_row,
+            text="PROJET",
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 7, "bold"),
+        ).pack(side="left")
 
         sort_combo = ttk.Combobox(
-            top_row, textvariable=self.sort_mode, state="readonly",
+            top_row,
+            textvariable=self.sort_mode,
+            state="readonly",
             values=[label for label, _mode in SORT_OPTIONS],
-            font=("Segoe UI", 8), width=8,
+            font=("Segoe UI", 8),
+            width=8,
+            style=configure_sort_combobox_style(),
         )
         sort_combo.pack(side="right", padx=(8, 0))
         sort_combo.bind("<<ComboboxSelected>>", self._on_sort_selected)
 
         self.project_picker = SearchableDropdown(
-            body, self.selected_name,
-            bg=BG, field_bg="#F5F5F5", border=BORDER,
-            muted=MUTED, accent=GREEN, highlight=GREEN, text="#222222",
+            body,
+            self.selected_name,
+            bg=THEME["bg"],
+            field_bg=THEME["surface"],
+            border=THEME["border"],
+            muted=THEME["muted"],
+            accent=THEME["green_dark"],
+            highlight=THEME["green"],
+            text=THEME["text"],
+            hover_bg=THEME["green_soft"],
             placeholder="Choisir un projet…",
         )
         self.project_picker.pack(fill="x", pady=(0, 12))
         self.bind("<Configure>", self._on_dialog_configure)
 
-        btn_frame = tk.Frame(body, bg=BG)
-        btn_frame.pack(fill="x", pady=(0, 0))
+        btn_frame = tk.Frame(body, bg=THEME["bg"])
+        btn_frame.pack(fill="x")
 
-        def btn(parent, text, color, cmd):
-            button = tk.Button(parent, text=text, bg=color, fg="white", bd=0,
-                               font=("Segoe UI", 9, "bold"), cursor="hand2",
-                               padx=10, pady=6, activebackground=ACCENT,
-                               activeforeground="white", command=cmd)
-            button.pack(side="left", padx=(0, 6))
-            return button
+        primary_button(btn_frame, "Renommer", self._rename, padx=10, pady=6).pack(
+            side="left", padx=(0, 6),
+        )
+        danger_button(btn_frame, "Supprimer", self._delete).pack(side="left")
 
-        btn(btn_frame, "✏  Renommer", ACCENT, self._rename)
-        btn(btn_frame, "🗑  Supprimer", RED, self._delete)
+        tk.Frame(body, bg=THEME["border"], height=1).pack(fill="x", pady=(14, 10))
 
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 8))
-
-        tk.Label(body, text="Ajouter un projet", bg=BG, fg=MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 4))
-        add_row = tk.Frame(body, bg=BG)
+        tk.Label(
+            body,
+            text="AJOUTER UN PROJET",
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 7, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        add_row = tk.Frame(body, bg=THEME["bg"])
         add_row.pack(fill="x")
         self.new_var = tk.StringVar()
-        entry = tk.Entry(add_row, textvariable=self.new_var,
-                         font=("Segoe UI", 10), bg="#F5F5F5", fg="#222222",
-                         relief="flat", bd=0, highlightthickness=1,
-                         highlightbackground=BORDER, highlightcolor=GREEN)
-        entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
+        entry = themed_entry(add_row, self.new_var, font=("Segoe UI", 10))
+        entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 6))
         entry.bind("<Return>", lambda _event: self._add())
-        tk.Button(add_row, text="＋ Ajouter", bg=GREEN, fg="white", bd=0,
-                  font=("Segoe UI", 9, "bold"), cursor="hand2",
-                  padx=10, pady=6, activebackground=ACCENT,
-                  activeforeground="white", command=self._add).pack(side="left")
+        primary_button(add_row, "Ajouter", self._add, padx=10, pady=6).pack(side="left")
 
-        tk.Button(body, text="Fermer", bg="#F0F0F0", fg="#444444", bd=0,
-                  font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6,
-                  command=self._close).pack(anchor="e", pady=(12, 0))
+        secondary_button(body, "Fermer", self._close).pack(anchor="e", pady=(14, 0))
 
     def _current_sort_mode(self) -> SortMode:
         label = self.sort_mode.get()
@@ -1034,6 +1395,7 @@ class TimeTrackerApp:
         self.start_time       = None
         self.elapsed          = 0
         self._running         = False
+        self._timer_gen       = 0
 
         self._build_ui()
         self._refresh_project_list()
@@ -1047,128 +1409,137 @@ class TimeTrackerApp:
         h  = self.root.winfo_height()
         self.root.geometry(f"+{sw - w - 30}+{sh - h - 60}")
 
-    def _build_ui(self):
-        # ── Palette (light / white theme) ──
-        BG     = "#FFFFFF"
-        CARD   = "#FFFFFF"
-        GREEN  = "#40916C"
-        RED    = "#E63946"
-        TEXT   = "#1A1A1A"
-        MUTED  = "#666666"
-        ACCENT = "#2D6A4F"
-        SUBTLE = "#F5F5F5"
-        BORDER = "#E0E0E0"
-        TIMER_COLOR = "#1B4332"
+    def _build_ui(self) -> None:
+        self.root.configure(bg=THEME["bg"])
 
-        self._BG     = BG
-        self._CARD   = CARD
-        self._GREEN  = GREEN
-        self._RED    = RED
-        self._TEXT   = TEXT
-        self._MUTED  = MUTED
-        self._ACCENT = ACCENT
-        self._SUBTLE = SUBTLE
-        self._BORDER = BORDER
-        self._TIMER  = TIMER_COLOR
-
-        self.root.configure(bg=BG)
-
-        # ── Title bar ──
-        title_bar = tk.Frame(self.root, bg=ACCENT, height=38)
-        title_bar.pack(fill="x")
-        title_bar.pack_propagate(False)
-        tk.Label(title_bar, text="⏱  Time Tracker", bg=ACCENT, fg="white",
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=12, pady=7)
-
+        title_bar = make_header(self.root, "Time Tracker")
         for widget in [title_bar] + title_bar.winfo_children():
             if not isinstance(widget, tk.Button):
                 widget.bind("<ButtonPress-1>", self._start_drag)
-                widget.bind("<B1-Motion>",     self._drag)
+                widget.bind("<B1-Motion>", self._drag)
 
-        # ── Body ──
-        body = tk.Frame(self.root, bg=BG, padx=16, pady=14)
+        body = tk.Frame(self.root, bg=THEME["bg"], padx=16, pady=16)
         body.pack(fill="both", expand=True)
 
-        # Project label + manage link
-        top_row = tk.Frame(body, bg=BG)
+        top_row = tk.Frame(body, bg=THEME["bg"])
         top_row.pack(fill="x", pady=(0, 6))
-        tk.Label(top_row, text="PROJET", bg=BG, fg=MUTED,
-                 font=("Segoe UI", 7, "bold")).pack(side="left")
-
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("W.TCombobox",
-                        fieldbackground=SUBTLE, background=SUBTLE,
-                        foreground=TEXT, selectbackground=GREEN,
-                        selectforeground="white", arrowcolor=ACCENT,
-                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-        style.map("W.TCombobox", fieldbackground=[("readonly", SUBTLE)])
+        tk.Label(
+            top_row,
+            text="PROJET",
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 7, "bold"),
+        ).pack(side="left")
 
         sort_combo = ttk.Combobox(
-            top_row, textvariable=self.sort_mode, state="readonly",
+            top_row,
+            textvariable=self.sort_mode,
+            state="readonly",
             values=[label for label, _mode in SORT_OPTIONS],
-            font=("Segoe UI", 8), width=8, style="W.TCombobox",
+            font=("Segoe UI", 8),
+            width=8,
+            style=configure_sort_combobox_style(),
         )
         sort_combo.pack(side="right", padx=(8, 0))
         sort_combo.bind("<<ComboboxSelected>>", self._on_sort_changed)
 
-        tk.Button(top_row, text="Gérer ›", bg=BG, fg=GREEN, bd=0,
-                  font=("Segoe UI", 7, "underline"), cursor="hand2",
-                  activebackground=BG, activeforeground=ACCENT,
-                  command=self._open_manage).pack(side="right")
+        ghost_button(
+            top_row,
+            "Gérer ›",
+            self._open_manage,
+            fg=THEME["green"],
+            font=("Segoe UI", 7),
+            underline=True,
+        ).pack(side="right")
 
         self.project_picker = SearchableDropdown(
-            body, self.selected_project,
-            bg=BG, field_bg=SUBTLE, border=BORDER,
-            muted=MUTED, accent=ACCENT, highlight=GREEN, text=TEXT,
+            body,
+            self.selected_project,
+            bg=THEME["bg"],
+            field_bg=THEME["surface"],
+            border=THEME["border"],
+            muted=THEME["muted"],
+            accent=THEME["green_dark"],
+            highlight=THEME["green"],
+            text=THEME["text"],
+            hover_bg=THEME["green_soft"],
         )
-        self.project_picker.pack(fill="x", pady=(0, 12))
+        self.project_picker.pack(fill="x", pady=(0, 14))
         self.root.bind("<Configure>", self._on_root_configure)
 
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(0, 12))
+        tk.Frame(body, bg=THEME["border"], height=1).pack(fill="x", pady=(0, 14))
 
-        self.timer_label = tk.Label(body, text="00:00:00", bg=BG, fg=TIMER_COLOR,
-                                     font=("Segoe UI Mono", 32, "bold"))
+        self.timer_label = tk.Label(
+            body,
+            text="00:00:00",
+            bg=THEME["bg"],
+            fg=THEME["timer"],
+            font=("Segoe UI Mono", 32, "bold"),
+        )
         self.timer_label.pack()
 
-        self.status_label = tk.Label(body, text="● En attente", bg=BG, fg=MUTED,
-                                      font=("Segoe UI", 9))
-        self.status_label.pack(pady=(2, 14))
+        self.status_label = tk.Label(
+            body,
+            text="● En attente",
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 9),
+        )
+        self.status_label.pack(pady=(4, 16))
 
-        btn_row = tk.Frame(body, bg=BG)
+        btn_row = tk.Frame(body, bg=THEME["bg"])
         btn_row.pack(fill="x")
 
-        self.start_btn = tk.Button(
-            btn_row, text="▶  Start", bg=GREEN, fg="white",
-            font=("Segoe UI", 10, "bold"), bd=0, cursor="hand2",
-            padx=14, pady=9, activebackground=ACCENT,
-            activeforeground="white", command=self._start
+        self.start_btn = primary_button(
+            btn_row,
+            "▶  Start",
+            self._start,
+            padx=14,
+            pady=10,
+            font=("Segoe UI", 10, "bold"),
         )
-        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         self.stop_btn = tk.Button(
-            btn_row, text="■  Stop", bg=SUBTLE, fg=MUTED,
-            font=("Segoe UI", 10, "bold"), bd=0, cursor="hand2",
-            padx=14, pady=9, activebackground=RED,
-            activeforeground="white", command=self._stop, state="disabled"
+            btn_row,
+            text="■  Stop",
+            font=("Segoe UI", 10, "bold"),
+            bd=0,
+            cursor="hand2",
+            padx=14,
+            pady=10,
+            disabledforeground=THEME["muted"],
+            relief="flat",
+            highlightthickness=0,
+            command=self._stop,
+        )
+        _bind_button_hover(
+            self.stop_btn,
+            normal_bg=THEME["surface"],
+            hover_bg=THEME["danger_soft"],
+        )
+        set_button_palette(
+            self.stop_btn,
+            bg=THEME["surface"],
+            fg=THEME["muted"],
+            hover_bg=THEME["danger_soft"],
+            state="disabled",
         )
         self.stop_btn.pack(side="left", fill="x", expand=True)
 
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 10))
+        tk.Frame(body, bg=THEME["border"], height=1).pack(fill="x", pady=(14, 12))
 
-        excel_footer = tk.Frame(body, bg=BG)
-        excel_footer.pack(fill="x", pady=(0, 6))
+        excel_footer = tk.Frame(body, bg=THEME["bg"])
+        excel_footer.pack(fill="x", pady=(0, 4))
 
-        def excel_link(parent: tk.Frame, text: str, command) -> None:
-            tk.Button(
-                parent, text=text, bg=BG, fg=MUTED,
-                font=("Segoe UI", 8), bd=0, cursor="hand2",
-                activebackground=BG, activeforeground=ACCENT,
-                anchor="w", command=command,
-            ).pack(fill="x", anchor="w", pady=(0, 4))
-
-        excel_link(excel_footer, "📊  Ouvrir Excel", self._open_excel)
-        excel_link(excel_footer, "📁  Changer l'emplacement…", self._open_excel_settings)
+        ghost_button(excel_footer, "Ouvrir Excel", self._open_excel).pack(
+            fill="x", anchor="w", pady=(0, 4),
+        )
+        ghost_button(
+            excel_footer,
+            "Changer l'emplacement…",
+            self._open_excel_settings,
+        ).pack(fill="x", anchor="w")
 
     def _current_sort_mode(self) -> SortMode:
         label = self.sort_mode.get()
@@ -1216,6 +1587,85 @@ class TimeTrackerApp:
         self.root.geometry(f"+{x}+{y}")
 
     # ── Timer ──
+    def _set_idle_controls(self) -> None:
+        set_button_palette(
+            self.start_btn,
+            bg=THEME["green"],
+            fg=THEME["white"],
+            hover_bg=THEME["green_dark"],
+            state="normal",
+        )
+        set_button_palette(
+            self.stop_btn,
+            bg=THEME["surface"],
+            fg=THEME["muted"],
+            hover_bg=THEME["danger_soft"],
+            state="disabled",
+        )
+
+    def _set_busy_controls(self) -> None:
+        set_button_palette(
+            self.start_btn,
+            bg=THEME["surface"],
+            fg=THEME["muted"],
+            hover_bg=THEME["surface"],
+            state="disabled",
+        )
+        set_button_palette(
+            self.stop_btn,
+            bg=THEME["surface"],
+            fg=THEME["muted"],
+            hover_bg=THEME["surface"],
+            state="disabled",
+        )
+
+    def _ask_session_notes(self) -> str:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Notes (optionnel)")
+        dialog.configure(bg=THEME["bg"])
+        dialog.attributes("-topmost", True)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        result: dict[str, str] = {"value": ""}
+
+        body = tk.Frame(dialog, bg=THEME["bg"], padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(
+            body,
+            text="Ajouter une note pour cette session :",
+            bg=THEME["bg"],
+            fg=THEME["muted"],
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(0, 8))
+        note_var = tk.StringVar()
+        entry = themed_entry(body, note_var, font=("Segoe UI", 10))
+        entry.pack(fill="x", ipady=6)
+        entry.focus_set()
+
+        def confirm() -> None:
+            result["value"] = note_var.get().strip()
+            dialog.destroy()
+
+        def skip() -> None:
+            result["value"] = ""
+            dialog.destroy()
+
+        btn_row = tk.Frame(body, bg=THEME["bg"])
+        btn_row.pack(fill="x", pady=(12, 0))
+        secondary_button(btn_row, "Sans note", skip).pack(side="left")
+        primary_button(btn_row, "OK", confirm).pack(side="right")
+        entry.bind("<Return>", lambda _event: confirm())
+        dialog.bind("<Escape>", lambda _event: skip())
+
+        dialog.update_idletasks()
+        px = self.root.winfo_rootx() + max((self.root.winfo_width() - 320) // 2, 0)
+        py = self.root.winfo_rooty() + 40
+        dialog.geometry(f"320x150+{px}+{py}")
+        dialog.wait_window()
+        return result["value"]
+
     def _start(self):
         project = self.selected_project.get().strip()
         if project not in project_names(self.projects):
@@ -1225,19 +1675,41 @@ class TimeTrackerApp:
         self.start_time = datetime.now()
         self.elapsed    = 0
         self._running   = True
-        self.start_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
-        self.stop_btn.config(state="normal",   bg=self._RED,    fg="white")
+        self._timer_gen += 1
+        tick_gen = self._timer_gen
+        set_button_palette(
+            self.start_btn,
+            bg=THEME["surface"],
+            fg=THEME["muted"],
+            hover_bg=THEME["surface"],
+            state="disabled",
+        )
+        set_button_palette(
+            self.stop_btn,
+            bg=THEME["danger"],
+            fg=THEME["white"],
+            hover_bg=THEME["danger_hover"],
+            state="normal",
+        )
         self.status_label.config(
-            text=f"● En cours — {self.selected_project.get()}", fg=self._GREEN)
-        threading.Thread(target=self._tick, daemon=True).start()
+            text=f"● En cours — {self.selected_project.get()}",
+            fg=THEME["green"],
+        )
+        threading.Thread(target=self._tick, args=(tick_gen,), daemon=True).start()
 
-    def _tick(self):
-        while self._running:
+    def _apply_timer_text(self, tick_gen: int, text: str) -> None:
+        if tick_gen != self._timer_gen:
+            return
+        self.timer_label.config(text=text)
+
+    def _tick(self, tick_gen: int) -> None:
+        while self._running and tick_gen == self._timer_gen:
             self.elapsed = (datetime.now() - self.start_time).total_seconds()
             h = int(self.elapsed // 3600)
             m = int((self.elapsed % 3600) // 60)
             s = int(self.elapsed % 60)
-            self.root.after(0, self.timer_label.config, {"text": f"{h:02}:{m:02}:{s:02}"})
+            text = f"{h:02}:{m:02}:{s:02}"
+            self.root.after(0, self._apply_timer_text, tick_gen, text)
             time.sleep(1)
 
     def _stop(self):
@@ -1245,25 +1717,90 @@ class TimeTrackerApp:
             return
         self._running = False
         self.tracking = False
+        self._timer_gen += 1
         end_time = datetime.now()
         project  = self.selected_project.get()
+        start_time = self.start_time
+        elapsed = self.elapsed
 
-        self.start_btn.config(state="normal",   bg=self._GREEN, fg="white")
-        self.stop_btn.config(state="disabled",  bg=self._SUBTLE, fg=self._MUTED)
-        self.status_label.config(text="✔ Session enregistrée", fg=self._ACCENT)
+        self._set_busy_controls()
+        self.status_label.config(text="● Enregistrement…", fg=THEME["muted"])
 
-        notes = simpledialog.askstring(
-            "Notes (optionnel)", "Ajouter une note pour cette session :",
-            parent=self.root) or ""
+        notes = self._ask_session_notes()
+        duration_label = format_session_duration(elapsed)
 
-        log_session(project, self.start_time, end_time, notes, self.excel_file)
+        try:
+            if start_time is None:
+                raise ExcelWriteError("Horodatage de début manquant.")
+            log_session(project, start_time, end_time, notes, self.excel_file)
+        except ExcelWriteError as exc:
+            self._set_idle_controls()
+            self.timer_label.config(text="00:00:00")
+            self.status_label.config(
+                text="⚠ Non enregistré",
+                fg=THEME["danger"],
+            )
+            messagebox.showerror(
+                "Enregistrement impossible",
+                f"La session n'a pas été écrite dans Excel.\n\n{exc}",
+                parent=self.root,
+            )
+            if "vrai .xlsx" in str(exc) or "illisible ou corrompu" in str(exc):
+                self._offer_recreate_excel()
+            self.status_label.config(text="● En attente", fg=THEME["muted"])
+            return
 
-        dur = int(self.elapsed)
-        h, m = dur // 3600, (dur % 3600) // 60
-        messagebox.showinfo("Session enregistrée",
-                            f"✔ {project}\nDurée : {h}h {m:02}min\n\nEnregistré dans :\n{self.excel_file}")
+        self._set_idle_controls()
         self.timer_label.config(text="00:00:00")
-        self.status_label.config(text="● En attente", fg=self._MUTED)
+        self.status_label.config(text="✔ Session enregistrée", fg=THEME["green_dark"])
+        messagebox.showinfo(
+            "Session enregistrée",
+            f"✔ {project}\nDurée : {duration_label}\n\nEnregistré dans :\n{self.excel_file}\n\n"
+            "Si Calc/Excel était ouvert : fermez puis rouvrez le fichier pour voir la ligne.",
+            parent=self.root,
+        )
+        self.status_label.config(text="● En attente", fg=THEME["muted"])
+
+    def _offer_recreate_excel(self) -> None:
+        if not messagebox.askyesno(
+            "Recréer le fichier Excel ?",
+            "Créer un nouveau fichier .xlsx valide à cet emplacement ?\n\n"
+            "L'ancien fichier sera renommé avec l'extension .bak "
+            "(vos anciennes lignes Calc restent dans le .bak).",
+            parent=self.root,
+        ):
+            return
+        excel_path = self.excel_file
+        if os.path.exists(excel_path):
+            bak_path = f"{excel_path}.bak"
+            suffix = 1
+            while os.path.exists(bak_path):
+                bak_path = f"{excel_path}.bak.{suffix}"
+                suffix += 1
+            try:
+                os.replace(excel_path, bak_path)
+            except OSError as exc:
+                messagebox.showerror(
+                    "Sauvegarde impossible",
+                    f"Impossible de renommer l'ancien fichier :\n{exc}",
+                    parent=self.root,
+                )
+                return
+        try:
+            ensure_excel(excel_path)
+        except ExcelWriteError as exc:
+            messagebox.showerror(
+                "Création impossible",
+                str(exc),
+                parent=self.root,
+            )
+            return
+        messagebox.showinfo(
+            "Fichier prêt",
+            f"Nouveau fichier créé :\n{excel_path}\n\n"
+            "Relancez Start → Stop pour enregistrer la session.",
+            parent=self.root,
+        )
 
     # ── Manage projects ──
     def _open_manage(self):
