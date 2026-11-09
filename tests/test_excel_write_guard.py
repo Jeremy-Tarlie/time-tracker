@@ -12,11 +12,14 @@ from time_tracker.excel import (
     ExcelWriteError,
     _assert_excel_ooxml,
     _excel_lock_paths,
+    delete_session_row,
     ensure_excel,
     format_session_duration,
+    list_sessions_for_day,
     log_session,
     rename_project_in_excel,
     sanitize_excel_text,
+    update_session_row,
 )
 
 
@@ -122,11 +125,11 @@ class TestExcelWriteGuard(unittest.TestCase):
             ensure_excel(path)
             start = datetime(2026, 10, 21, 15, 0, 0)
             end = datetime(2026, 10, 21, 15, 0, 5)
-            log_session("Projet 1", start, end, "=HYPERLINK(\"http://x\")", path)
+            log_session("Projet 1", start, end, '=HYPERLINK("http://x")', path)
             from openpyxl import load_workbook
 
             wb = load_workbook(path)
-            self.assertEqual(wb["Sessions"].cell(2, 7).value, "'=HYPERLINK(\"http://x\")")
+            self.assertEqual(wb["Sessions"].cell(2, 7).value, '\'=HYPERLINK("http://x")')
             wb.close()
 
     def test_rename_raises_on_ole_file(self) -> None:
@@ -141,6 +144,7 @@ class TestExcelWriteGuard(unittest.TestCase):
             path = os.path.join(tmp, "heures_projet.xlsx")
             ensure_excel(path)
             from openpyxl import load_workbook
+
             from time_tracker.excel import _refresh_summary, _save_workbook_atomic
 
             wb = load_workbook(path)
@@ -157,6 +161,113 @@ class TestExcelWriteGuard(unittest.TestCase):
             self.assertEqual(summary_name, "'=1+1")
             self.assertEqual(wb["Résumé par projet"].cell(3, 1).data_type, "s")
             wb.close()
+
+    def test_refresh_summary_clears_orphan_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "heures_projet.xlsx")
+            ensure_excel(path)
+            from openpyxl import load_workbook
+
+            from time_tracker.excel import _refresh_summary, _save_workbook_atomic
+
+            wb = load_workbook(path)
+            ws2 = wb["Résumé par projet"]
+            ws2.cell(3, 1).value = "Ancien"
+            ws2.cell(3, 2).value = 9
+            ws2.cell(3, 3).value = 2
+            ws = wb["Sessions"]
+            ws.cell(2, 1).value = "21/10/2026"
+            ws.cell(2, 2).value = "Nouveau"
+            ws.cell(2, 5).value = 1.5
+            _refresh_summary(wb)
+            _save_workbook_atomic(wb, path)
+            wb.close()
+
+            wb = load_workbook(path)
+            self.assertEqual(wb["Résumé par projet"].cell(3, 1).value, "Nouveau")
+            self.assertIsNone(wb["Résumé par projet"].cell(4, 1).value)
+            wb.close()
+
+    def test_refresh_summary_ignores_invalid_duration_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "heures_projet.xlsx")
+            ensure_excel(path)
+            from openpyxl import load_workbook
+
+            from time_tracker.excel import _refresh_summary, _save_workbook_atomic
+
+            wb = load_workbook(path)
+            ws = wb["Sessions"]
+            ws.cell(2, 1).value = "21/10/2026"
+            ws.cell(2, 2).value = "A"
+            ws.cell(2, 5).value = "N/A"
+            ws.cell(3, 1).value = "21/10/2026"
+            ws.cell(3, 2).value = "A"
+            ws.cell(3, 5).value = "1,5"
+            _refresh_summary(wb)
+            _save_workbook_atomic(wb, path)
+            wb.close()
+
+            wb = load_workbook(path)
+            self.assertEqual(wb["Résumé par projet"].cell(3, 1).value, "A")
+            self.assertEqual(wb["Résumé par projet"].cell(3, 2).value, 1.5)
+            self.assertEqual(wb["Résumé par projet"].cell(3, 3).value, 1)
+            wb.close()
+
+    def test_list_sessions_includes_row_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "heures_projet.xlsx")
+            ensure_excel(path)
+            start = datetime(2026, 10, 21, 9, 0, 0)
+            end = datetime(2026, 10, 21, 10, 0, 0)
+            row = log_session("A", start, end, "n", path)
+            sessions = list_sessions_for_day(path, start)
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["row_index"], row)
+            self.assertEqual(sessions[0]["project"], "A")
+
+    def test_update_session_row_changes_project_and_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "heures_projet.xlsx")
+            ensure_excel(path)
+            start = datetime(2026, 10, 21, 9, 0, 0)
+            end = datetime(2026, 10, 21, 10, 0, 0)
+            row = log_session("A", start, end, "old", path)
+            update_session_row(
+                path,
+                row,
+                project="B",
+                start_dt=start,
+                end_dt=end,
+                notes="=1+1",
+            )
+            sessions = list_sessions_for_day(path, start)
+            self.assertEqual(sessions[0]["project"], "B")
+            self.assertTrue(sessions[0]["notes"].endswith("=1+1"))
+
+    def test_delete_session_row_removes_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "heures_projet.xlsx")
+            ensure_excel(path)
+            start = datetime(2026, 10, 21, 9, 0, 0)
+            end = datetime(2026, 10, 21, 10, 0, 0)
+            row = log_session("A", start, end, "", path)
+            delete_session_row(path, row)
+            self.assertEqual(list_sessions_for_day(path, start), [])
+
+    def test_update_session_row_rejects_ole_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "heures_projet.xlsx"
+            fake.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+            with self.assertRaises(ExcelWriteError):
+                update_session_row(
+                    str(fake),
+                    2,
+                    project="A",
+                    start_dt=datetime(2026, 1, 1, 10, 0, 0),
+                    end_dt=datetime(2026, 1, 1, 11, 0, 0),
+                    notes="",
+                )
 
 
 if __name__ == "__main__":

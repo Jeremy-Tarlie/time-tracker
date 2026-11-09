@@ -1,0 +1,42 @@
+[project]
+name = "flo-timetracker"
+version = "1.5.0"
+description = "Suivi du temps par projet avec export Excel"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "openpyxl==3.1.5",
+  "pystray==0.19.5",
+  "Pillow==13.0.0",
+  "pynput==1.8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "pip-audit>=2.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+packages = ["time_tracker"]
+
+[[tool.mypy.overrides]]
+module = ["pystray.*", "openpyxl.*", "pynput.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["time_tracker.widgets", "time_tracker.dialogs"]
+disable_error_code = ["no-untyped-call"]

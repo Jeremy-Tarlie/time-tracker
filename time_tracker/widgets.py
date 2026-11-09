@@ -43,6 +43,7 @@ class SearchableDropdown(tk.Frame):
         self._open = False
         self._updating_list = False
         self._outside_click_armed = False
+        self._enabled = True
 
         shell = tk.Frame(self, bg=border, padx=1, pady=1)
         shell.pack(fill="x")
@@ -50,13 +51,22 @@ class SearchableDropdown(tk.Frame):
         self.trigger.pack(fill="x")
 
         self.value_label = tk.Label(
-            self.trigger, text="", bg=field_bg, fg=text, anchor="w",
-            font=("Segoe UI", 10), padx=10, pady=8,
+            self.trigger,
+            text="",
+            bg=field_bg,
+            fg=text,
+            anchor="w",
+            font=("Segoe UI", 10),
+            padx=12,
+            pady=9,
         )
         self.value_label.pack(side="left", fill="x", expand=True)
         caret = tk.Label(
-            self.trigger, text="▼", bg=field_bg, fg=muted,
-            font=("Segoe UI", 8),
+            self.trigger,
+            text="▾",
+            bg=field_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
         )
         caret.pack(side="right", padx=(0, 10))
 
@@ -90,14 +100,23 @@ class SearchableDropdown(tk.Frame):
         if self._open:
             self._close()
 
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = enabled
+        cursor = "hand2" if enabled else "arrow"
+        self.trigger.configure(cursor=cursor)
+        if not enabled:
+            self.close_if_open()
+
     def _toggle(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        if not self._enabled:
+            return
         if self._open:
             self._close()
         else:
             self._open_popup()
 
     def _open_popup(self) -> None:
-        if not self._items or self._open:
+        if not self._enabled or not self._items or self._open:
             return
 
         self._close()
@@ -109,7 +128,12 @@ class SearchableDropdown(tk.Frame):
         width = max(self.winfo_width(), 260)
         popup_height = 44 + self.POPUP_LIST_HEIGHT * 24 + 8
         x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height() + 2
+        screen_height = self.winfo_screenheight()
+        below_y = self.winfo_rooty() + self.winfo_height() + 2
+        if below_y + popup_height > screen_height:
+            y = max(0, self.winfo_rooty() - popup_height - 2)
+        else:
+            y = below_y
         self._popup.geometry(f"{width}x{popup_height}+{x}+{y}")
 
         container = tk.Frame(self._popup, bg=self._bg, padx=1, pady=1)
@@ -119,10 +143,16 @@ class SearchableDropdown(tk.Frame):
         search_wrap.pack(fill="x")
         self._search_var.set("")
         search_entry = tk.Entry(
-            search_wrap, textvariable=self._search_var,
-            font=("Segoe UI", 10), bg=self._field_bg, fg=self._text,
-            relief="flat", bd=0, highlightthickness=1,
-            highlightbackground=self._border, highlightcolor=self._highlight,
+            search_wrap,
+            textvariable=self._search_var,
+            font=("Segoe UI", 10),
+            bg=self._field_bg,
+            fg=self._text,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self._border,
+            highlightcolor=self._highlight,
         )
         search_entry.pack(fill="x", padx=8, pady=8, ipady=3)
         search_entry.bind("<Escape>", lambda _event: self._close())
@@ -136,11 +166,18 @@ class SearchableDropdown(tk.Frame):
 
         scrollbar = tk.Scrollbar(list_frame, orient="vertical")
         self._listbox = tk.Listbox(
-            list_frame, yscrollcommand=scrollbar.set,
-            font=("Segoe UI", 10), bg=self._bg, fg=self._text,
-            selectbackground=self._highlight, selectforeground="white",
-            activestyle="none", relief="flat", bd=0,
-            highlightthickness=0, height=self.POPUP_LIST_HEIGHT,
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 10),
+            bg=self._bg,
+            fg=self._text,
+            selectbackground=self._highlight,
+            selectforeground="white",
+            activestyle="none",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            height=self.POPUP_LIST_HEIGHT,
         )
         scrollbar.config(command=self._listbox.yview)
         scrollbar.pack(side="right", fill="y")
@@ -150,7 +187,8 @@ class SearchableDropdown(tk.Frame):
         self._listbox.bind("<Return>", self._on_list_select)
         self._listbox.bind("<Escape>", lambda _event: self._close())
         self._search_trace_id = self._search_var.trace_add(
-            "write", lambda *_: self._refresh_list(),
+            "write",
+            lambda *_: self._refresh_list(),
         )
 
         self._open = True

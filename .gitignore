@@ -16,6 +16,10 @@ env/
 # Données utilisateur locales
 heures_projet.xlsx
 projects.json
+pending_sessions.json
+active_session.json
+timetracker.lock
+*.corrupt.*
 
 # IDE / OS
 .idea/

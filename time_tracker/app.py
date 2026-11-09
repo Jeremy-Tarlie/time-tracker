@@ -1,61 +1,208 @@
 from __future__ import annotations
 
 import os
+import re
+import sys
 import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
 from tkinter import messagebox, ttk
+from typing import Literal
 
-from time_tracker.config import load_config, project_names, save_config, sort_projects
+from time_tracker.config import (
+    load_config,
+    project_names,
+    save_config,
+    sort_projects,
+    touch_project_last_used,
+)
 from time_tracker.constants import (
     DEFAULT_SORT,
     SORT_LABELS,
     SORT_OPTIONS,
+    HotkeyAction,
+    HotkeysConfig,
+    PendingSession,
     ProjectEntry,
     SortMode,
 )
-from time_tracker.dialogs import ExcelFileDialog, ManageProjectsDialog
+from time_tracker.dialogs import (
+    AboutDialog,
+    ExcelFileDialog,
+    ManageProjectsDialog,
+    ManualSessionDialog,
+    PeriodHistoryDialog,
+    SettingsDialog,
+    TodayHistoryDialog,
+)
 from time_tracker.excel import (
     ExcelWriteError,
     ensure_excel,
     format_session_duration,
-    log_session,
     open_excel_file,
 )
+from time_tracker.hotkeys import (
+    HOTKEY_ACTIONS,
+    GlobalHotkeyController,
+    hotkey_to_tk,
+    parse_hotkeys,
+)
+from time_tracker.logging_setup import get_logger
+from time_tracker.session_store import (
+    clear_active_session,
+    enqueue_pending_session,
+    load_active_session,
+    load_pending_sessions,
+)
+from time_tracker.session_writer import flush_pending_sync, run_in_thread, write_session_sync
+from time_tracker.startup import (
+    apply_startup_preference,
+    is_startup_registered,
+    startup_available,
+    startup_label,
+)
+from time_tracker.theme import (
+    THEME,
+    Theme,
+    apply_ttk_theme,
+    apply_window,
+    font_mono,
+    font_ui,
+    hairline,
+    make_button,
+    section_label,
+)
+from time_tracker.timer_controller import TimerState, format_elapsed
+from time_tracker.tray import TrayController
 from time_tracker.widgets import SearchableDropdown
+
+logger = get_logger()
+
+_PENDING_RETRY_MS = 15_000
+_GEOMETRY_DEBOUNCE_MS = 400
 
 
 class TimeTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("⏱ Time Tracker")
-        self.root.minsize(240, 370)
-        self.root.geometry("240x370")
+        self.root.title("Time Tracker")
+        self.root.minsize(320, 560)
         self.root.resizable(True, True)
-        self.root.attributes("-topmost", True)
-        self.root.attributes("-alpha", 0.98)
+        self._theme: Theme = THEME
+        apply_window(self.root, self._theme)
 
         config = load_config()
         self.projects: list[ProjectEntry] = config["projects"]
         self.excel_file: str = config["excel_file"]
+        self.launch_at_startup = bool(config.get("launch_at_startup", False))
+        self.always_on_top = bool(config.get("always_on_top", True))
+        self.window_geometry: str | None = config.get("window_geometry")
+        self.hotkeys: HotkeysConfig = parse_hotkeys(config.get("hotkeys"))
         self.sort_mode = tk.StringVar(value=SORT_LABELS[config["sort_mode"]])
+        self._apply_topmost()
         names = project_names(sort_projects(self.projects, config["sort_mode"]))
         self.selected_project = tk.StringVar(value=names[0] if names else "")
-        self.tracking = False
-        self.start_time: datetime | None = None
-        self.elapsed = 0.0
-        self._running = False
-        self._timer_gen = 0
-        self._drag_x = 0
-        self._drag_y = 0
+        self._timer = TimerState()
+        self._tray: TrayController | None = None
+        self._quitting = False
+        self._geometry_job: str | None = None
+        self._pending_retry_job: str | None = None
+        self._global_hotkeys: GlobalHotkeyController | None = None
+        self._tk_hotkey_bindings: list[str] = []
+        self._hotkey_permission_warned = False
+
+        self._manage_btn: tk.Button | None = None
+        self._pause_btn: tk.Button | None = None
+        self._retry_btn: tk.Button | None = None
+        self._sessions_divider: tk.Frame | None = None
+        self._status_dot: tk.Label | None = None
+        self._status_wrap: tk.Frame | None = None
 
         self._build_ui()
+        self._setup_hotkeys()
         self._refresh_project_list()
-        self._position_window()
+        self._restore_or_position_window()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        self.root.after(200, self._post_init)
 
-    def _position_window(self) -> None:
+    @property
+    def tracking(self) -> bool:
+        return self._timer.tracking
+
+    @property
+    def paused(self) -> bool:
+        return self._timer.paused
+
+    @property
+    def active_project(self) -> str | None:
+        return self._timer.active_project
+
+    @property
+    def start_time(self) -> datetime | None:
+        return self._timer.start_time
+
+    @property
+    def elapsed(self) -> float:
+        return self._timer.elapsed
+
+    @property
+    def _writing(self) -> bool:
+        return self._timer.writing
+
+    @_writing.setter
+    def _writing(self, value: bool) -> None:
+        self._timer.writing = value
+
+    @property
+    def _running(self) -> bool:
+        return self._timer.running
+
+    @property
+    def _timer_gen(self) -> int:
+        return self._timer.timer_gen
+
+    @property
+    def _accumulated(self) -> float:
+        return self._timer.accumulated
+
+    def _post_init(self) -> None:
+        self._setup_tray()
+        self._recover_active_session()
+        self._flush_pending_async(silent_if_empty=True, quiet=True)
+        self._schedule_pending_retry()
+
+    def _setup_tray(self) -> None:
+        def schedule_show() -> None:
+            self.root.after(0, self._show_window)
+
+        def schedule_quit() -> None:
+            self.root.after(0, self._quit_app)
+
+        def schedule_toggle() -> None:
+            self.root.after(0, self._tray_toggle_timer)
+
+        self._tray = TrayController(
+            on_show=schedule_show,
+            on_quit=schedule_quit,
+            on_toggle_timer=schedule_toggle,
+        )
+        self._tray.start()
+
+    def _show_window(self) -> None:
+        self.root.deiconify()
+        self._apply_topmost()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_toggle_timer(self) -> None:
+        if self.tracking and not self.paused:
+            self._stop()
+        elif not self.tracking:
+            self._start()
+
+    def _default_corner_geometry(self) -> None:
         self.root.update_idletasks()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
@@ -63,134 +210,386 @@ class TimeTrackerApp:
         h = self.root.winfo_height()
         self.root.geometry(f"+{sw - w - 30}+{sh - h - 60}")
 
+    def _clamp_geometry(self, geometry: str) -> str | None:
+        """Parse WxH±X±Y et clamp dans l'écran ; None si invalide."""
+        match = re.fullmatch(
+            r"(?P<w>\d+)x(?P<h>\d+)(?P<x>[+-]\d+)(?P<y>[+-]\d+)",
+            geometry.strip(),
+        )
+        if match is None:
+            return None
+        width = int(match.group("w"))
+        height = int(match.group("h"))
+        x = int(match.group("x"))
+        y = int(match.group("y"))
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        width = max(320, min(width, sw))
+        height = max(400, min(height, sh))
+        x = max(0, min(x, max(0, sw - width)))
+        y = max(0, min(y, max(0, sh - height)))
+        return f"{width}x{height}+{x}+{y}"
+
+    def _restore_or_position_window(self) -> None:
+        if self.window_geometry:
+            clamped = self._clamp_geometry(self.window_geometry)
+            if clamped:
+                self.root.geometry(clamped)
+                return
+        self.root.geometry("320x560")
+        self._default_corner_geometry()
+
+    def _capture_geometry(self) -> None:
+        if self._quitting:
+            return
+        geom = self.root.geometry()
+        if geom == self.window_geometry:
+            return
+        self.window_geometry = geom
+        self._save_config()
+
+    def _schedule_geometry_save(self) -> None:
+        if self._geometry_job is not None:
+            self.root.after_cancel(self._geometry_job)
+        self._geometry_job = self.root.after(_GEOMETRY_DEBOUNCE_MS, self._capture_geometry)
+
+    def _apply_topmost(self) -> None:
+        self.root.attributes("-topmost", bool(self.always_on_top))
+
+    def _set_status(
+        self,
+        text: str,
+        *,
+        kind: Literal["idle", "running", "paused", "busy", "ok", "error"] = "idle",
+    ) -> None:
+        t = self._theme
+        colors: dict[str, tuple[str, str]] = {
+            "idle": (t.muted, t.field),
+            "running": (t.success, t.pill_ok_bg),
+            "paused": (t.warning_dim, t.pill_paused_bg),
+            "busy": (t.muted, t.field),
+            "ok": (t.success, t.pill_ok_bg),
+            "error": (t.danger, t.pill_error_bg),
+        }
+        fg, pill_bg = colors[kind]
+        if self._status_wrap is not None:
+            self._status_wrap.configure(bg=pill_bg)
+        if self._status_dot is not None:
+            self._status_dot.configure(bg=pill_bg, fg=fg)
+        self.status_label.configure(bg=pill_bg, fg=fg, text=text)
+
+    def _hotkey_handlers(self) -> dict[HotkeyAction, Callable[[], None]]:
+        return {
+            "toggle": self._hotkey_toggle,
+            "stop": self._hotkey_stop,
+            "settings": self._hotkey_settings,
+            "show": self._show_window,
+            "today": self._open_today,
+            "period": self._open_period,
+            "manual": self._open_manual,
+        }
+
+    def _setup_hotkeys(self) -> None:
+        self._unbind_tk_hotkeys()
+        handlers = self._hotkey_handlers()
+        if self._global_hotkeys is None:
+
+            def _schedule(callback: Callable[[], None]) -> None:
+                self.root.after(0, callback)
+
+            self._global_hotkeys = GlobalHotkeyController(
+                schedule=_schedule,
+                handlers=handlers,
+            )
+        error = self._global_hotkeys.start(self.hotkeys)
+        if error:
+            logger.warning("Hotkeys globaux indisponibles (%s) — repli Tk", error)
+            self._bind_tk_hotkeys()
+            if not self._hotkey_permission_warned and "Permissions macOS" in error:
+                self._hotkey_permission_warned = True
+                messagebox.showwarning(
+                    "Raccourcis globaux",
+                    "Les raccourcis globaux sont désactivés faute de permissions macOS.\n\n"
+                    "Réglages système → Confidentialité et sécurité →\n"
+                    "Accessibilité et Surveillance des entrées : autorisez Time Tracker "
+                    "(ou Terminal / Python en développement), puis redémarrez l'app.\n\n"
+                    "En attendant, les raccourcis fonctionnent uniquement "
+                    "quand la fenêtre est active.",
+                    parent=self.root,
+                )
+
+    def _unbind_tk_hotkeys(self) -> None:
+        for sequence in self._tk_hotkey_bindings:
+            self.root.unbind(sequence)
+        self._tk_hotkey_bindings = []
+
+    def _bind_tk_hotkeys(self) -> None:
+        handlers = self._hotkey_handlers()
+        for action in HOTKEY_ACTIONS:
+            sequence = hotkey_to_tk(self.hotkeys[action])
+            callback = handlers[action]
+
+            def _make(cb: Callable[[], None] = callback) -> Callable[[object], str]:
+                def handler(_event: object = None) -> str:
+                    cb()
+                    return "break"
+
+                return handler
+
+            self.root.bind(sequence, _make())
+            self._tk_hotkey_bindings.append(sequence)
+
+    def _hotkey_toggle(self, _event: object = None) -> None:
+        if self._writing:
+            return
+        if self.tracking:
+            self._toggle_pause()
+        else:
+            self._start()
+
+    def _hotkey_stop(self, _event: object = None) -> None:
+        if self.tracking:
+            self._stop()
+
+    def _hotkey_settings(self, _event: object = None) -> None:
+        self._open_settings()
+
+    def _schedule_pending_retry(self) -> None:
+        if self._pending_retry_job is not None:
+            self.root.after_cancel(self._pending_retry_job)
+        self._pending_retry_job = self.root.after(
+            _PENDING_RETRY_MS,
+            self._auto_retry_pending,
+        )
+
+    def _auto_retry_pending(self) -> None:
+        self._pending_retry_job = None
+        if not self._quitting and load_pending_sessions():
+            if not self._writing and not self.tracking:
+                self._flush_pending_async(silent_if_empty=True, quiet=True)
+        if not self._quitting:
+            self._schedule_pending_retry()
+
     def _build_ui(self) -> None:
-        bg = "#FFFFFF"
-        card = "#FFFFFF"
-        green = "#40916C"
-        red = "#E63946"
-        text = "#1A1A1A"
-        muted = "#666666"
-        accent = "#2D6A4F"
-        subtle = "#F5F5F5"
-        border = "#E0E0E0"
-        timer_color = "#1B4332"
+        t = self._theme
+        self._BG = t.bg
+        self._GREEN = t.accent
+        self._RED = t.danger
+        self._TEXT = t.text
+        self._MUTED = t.muted
+        self._ACCENT = t.accent
+        self._SUBTLE = t.field
+        self._BORDER = t.border
+        self._TIMER = t.timer
+        self._AMBER = t.warning
+        self._ON_ACCENT = t.on_accent
+        self._ON_SOLID = t.on_solid
+        self._SUCCESS = t.success
+        self._SURFACE = t.surface
 
-        self._BG = bg
-        self._CARD = card
-        self._GREEN = green
-        self._RED = red
-        self._TEXT = text
-        self._MUTED = muted
-        self._ACCENT = accent
-        self._SUBTLE = subtle
-        self._BORDER = border
-        self._TIMER = timer_color
+        apply_window(self.root, t)
+        apply_ttk_theme()
 
-        self.root.configure(bg=bg)
-
-        title_bar = tk.Frame(self.root, bg=accent, height=38)
-        title_bar.pack(fill="x")
-        title_bar.pack_propagate(False)
+        brand = tk.Frame(self.root, bg=t.surface)
+        brand.pack(fill="x")
+        tk.Frame(brand, bg=t.accent, width=4).pack(side="left", fill="y")
+        settings_btn = make_button(
+            brand,
+            "Réglages",
+            self._open_settings,
+            variant="link",
+            font_size=9,
+            bold=False,
+            padx=10,
+            pady=4,
+        )
+        settings_btn.configure(fg=t.accent, activeforeground=t.accent_dim)
+        settings_btn.pack(side="right", padx=(0, 12), pady=12)
+        brand_text = tk.Frame(brand, bg=t.surface)
+        brand_text.pack(side="left", fill="both", expand=True, padx=(14, 8), pady=12)
         tk.Label(
-            title_bar, text="⏱  Time Tracker", bg=accent, fg="white",
-            font=("Segoe UI", 11, "bold"),
-        ).pack(side="left", padx=12, pady=7)
+            brand_text,
+            text="Time Tracker",
+            bg=t.surface,
+            fg=t.text,
+            font=font_ui(14, bold=True),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            brand_text,
+            text="Suivi du temps par projet",
+            bg=t.surface,
+            fg=t.muted,
+            font=font_ui(8),
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+        hairline(self.root, t)
 
-        for widget in [title_bar] + title_bar.winfo_children():
-            if not isinstance(widget, tk.Button):
-                widget.bind("<ButtonPress-1>", self._start_drag)
-                widget.bind("<B1-Motion>", self._drag)
-
-        body = tk.Frame(self.root, bg=bg, padx=16, pady=14)
+        body = tk.Frame(self.root, bg=t.bg, padx=20, pady=18)
         body.pack(fill="both", expand=True)
 
-        top_row = tk.Frame(body, bg=bg)
-        top_row.pack(fill="x", pady=(0, 6))
-        tk.Label(
-            top_row, text="PROJET", bg=bg, fg=muted, font=("Segoe UI", 7, "bold"),
-        ).pack(side="left")
-
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure(
-            "W.TCombobox",
-            fieldbackground=subtle, background=subtle,
-            foreground=text, selectbackground=green,
-            selectforeground="white", arrowcolor=accent,
-            bordercolor=border, lightcolor=border, darkcolor=border,
-        )
-        style.map("W.TCombobox", fieldbackground=[("readonly", subtle)])
+        top_row = tk.Frame(body, bg=t.bg)
+        top_row.pack(fill="x", pady=(0, 8))
+        section_label(top_row, "Projet").pack(side="left")
 
         sort_combo = ttk.Combobox(
-            top_row, textvariable=self.sort_mode, state="readonly",
+            top_row,
+            textvariable=self.sort_mode,
+            state="readonly",
             values=[label for label, _mode in SORT_OPTIONS],
-            font=("Segoe UI", 8), width=8, style="W.TCombobox",
+            font=font_ui(8),
+            width=8,
+            style="App.TCombobox",
         )
         sort_combo.pack(side="right", padx=(8, 0))
         sort_combo.bind("<<ComboboxSelected>>", self._on_sort_changed)
 
-        tk.Button(
-            top_row, text="Gérer ›", bg=bg, fg=green, bd=0,
-            font=("Segoe UI", 7, "underline"), cursor="hand2",
-            activebackground=bg, activeforeground=accent,
-            command=self._open_manage,
-        ).pack(side="right")
+        self._manage_btn = make_button(
+            top_row,
+            "Gérer",
+            self._open_manage,
+            variant="link",
+            font_size=9,
+            bold=False,
+            padx=6,
+            pady=0,
+        )
+        self._manage_btn.configure(fg=t.accent, activeforeground=t.accent_dim)
+        self._manage_btn.pack(side="right")
 
         self.project_picker = SearchableDropdown(
-            body, self.selected_project,
-            bg=bg, field_bg=subtle, border=border,
-            muted=muted, accent=accent, highlight=green, text=text,
+            body,
+            self.selected_project,
+            bg=t.bg,
+            field_bg=t.surface,
+            border=t.border,
+            muted=t.muted,
+            accent=t.accent_dim,
+            highlight=t.accent,
+            text=t.text,
         )
-        self.project_picker.pack(fill="x", pady=(0, 12))
+        self.project_picker.pack(fill="x", pady=(0, 18))
         self.root.bind("<Configure>", self._on_root_configure)
 
-        tk.Frame(body, bg=border, height=1).pack(fill="x", pady=(0, 12))
+        timer_card = tk.Frame(
+            body,
+            bg=t.surface,
+            highlightthickness=1,
+            highlightbackground=t.border,
+        )
+        timer_card.pack(fill="x", pady=(0, 16))
+        timer_inner = tk.Frame(timer_card, bg=t.surface, padx=16, pady=20)
+        timer_inner.pack(fill="x")
 
         self.timer_label = tk.Label(
-            body, text="00:00:00", bg=bg, fg=timer_color,
-            font=("Segoe UI Mono", 32, "bold"),
+            timer_inner,
+            text="00:00:00",
+            bg=t.surface,
+            fg=t.timer,
+            font=font_mono(40, bold=True),
         )
         self.timer_label.pack()
 
-        self.status_label = tk.Label(
-            body, text="● En attente", bg=bg, fg=muted, font=("Segoe UI", 9),
+        self._status_wrap = tk.Frame(timer_inner, bg=t.field, padx=10, pady=4)
+        self._status_wrap.pack(pady=(10, 0))
+        self._status_dot = tk.Label(
+            self._status_wrap,
+            text="●",
+            bg=t.field,
+            fg=t.muted,
+            font=font_ui(8),
         )
-        self.status_label.pack(pady=(2, 14))
+        self._status_dot.pack(side="left", padx=(0, 6))
+        self.status_label = tk.Label(
+            self._status_wrap,
+            text="En attente",
+            bg=t.field,
+            fg=t.muted,
+            font=font_ui(9),
+        )
+        self.status_label.pack(side="left")
 
-        btn_row = tk.Frame(body, bg=bg)
+        btn_row = tk.Frame(body, bg=t.bg)
         btn_row.pack(fill="x")
 
-        self.start_btn = tk.Button(
-            btn_row, text="▶  Start", bg=green, fg="white",
-            font=("Segoe UI", 10, "bold"), bd=0, cursor="hand2",
-            padx=14, pady=9, activebackground=accent,
-            activeforeground="white", command=self._start,
+        self.start_btn = make_button(
+            btn_row,
+            "Démarrer",
+            self._start,
+            variant="primary",
+            padx=12,
+            pady=12,
         )
-        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        self.stop_btn = tk.Button(
-            btn_row, text="■  Stop", bg=subtle, fg=muted,
-            font=("Segoe UI", 10, "bold"), bd=0, cursor="hand2",
-            padx=14, pady=9, activebackground=red,
-            activeforeground="white", command=self._stop, state="disabled",
+        self._pause_btn = make_button(
+            btn_row,
+            "Pause",
+            self._toggle_pause,
+            variant="subtle",
+            padx=12,
+            pady=12,
         )
+        self._pause_btn.configure(state="disabled")
+        self._pause_btn.pack(side="left", padx=(0, 6))
+
+        self.stop_btn = make_button(
+            btn_row,
+            "Arrêter",
+            self._stop,
+            variant="subtle",
+            padx=12,
+            pady=12,
+        )
+        self.stop_btn.configure(state="disabled")
         self.stop_btn.pack(side="left", fill="x", expand=True)
 
-        tk.Frame(body, bg=border, height=1).pack(fill="x", pady=(12, 10))
+        self._retry_btn = make_button(
+            body,
+            "Réessayer l'enregistrement",
+            self._retry_pending,
+            variant="subtle",
+            font_size=9,
+            bold=False,
+            padx=10,
+            pady=9,
+        )
+        self._retry_btn.configure(fg=t.danger)
+        # Affiché uniquement s'il y a des sessions en file (voir _update_retry_button).
+        self._sessions_divider = tk.Frame(body, bg=t.border, height=1)
+        self._sessions_divider.pack(fill="x", pady=(18, 14))
 
-        excel_footer = tk.Frame(body, bg=bg)
-        excel_footer.pack(fill="x", pady=(0, 6))
+        section_label(body, "Sessions").pack(anchor="w", pady=(0, 6))
+        primary_actions = tk.Frame(body, bg=t.bg)
+        primary_actions.pack(fill="x", pady=(0, 10))
 
-        def excel_link(parent: tk.Frame, label: str, command: Callable[[], None]) -> None:
-            tk.Button(
-                parent, text=label, bg=bg, fg=muted,
-                font=("Segoe UI", 8), bd=0, cursor="hand2",
-                activebackground=bg, activeforeground=accent,
-                anchor="w", command=command,
-            ).pack(fill="x", anchor="w", pady=(0, 4))
+        def action_link(parent: tk.Frame, label: str, command: Callable[[], None]) -> None:
+            make_button(
+                parent,
+                label,
+                command,
+                variant="link",
+                font_size=9,
+                bold=False,
+                padx=0,
+                pady=3,
+            ).pack(fill="x", anchor="w")
 
-        excel_link(excel_footer, "📊  Ouvrir Excel", self._open_excel)
-        excel_link(excel_footer, "📁  Changer l'emplacement…", self._open_excel_settings)
+        action_link(primary_actions, "Aujourd'hui", self._open_today)
+        action_link(primary_actions, "Période…", self._open_period)
+        action_link(primary_actions, "Saisie manuelle…", self._open_manual)
+
+        section_label(body, "Excel").pack(anchor="w", pady=(4, 6))
+        secondary = tk.Frame(body, bg=t.bg)
+        secondary.pack(fill="x")
+        action_link(secondary, "Ouvrir Excel", self._open_excel)
+        action_link(secondary, "Changer l'emplacement…", self._open_excel_settings)
+        action_link(secondary, "À propos…", self._open_about)
+
+        self._update_retry_button()
+        self._sync_start_enabled()
+        self._set_status("En attente", kind="idle")
 
     def _current_sort_mode(self) -> SortMode:
         label = self.sort_mode.get()
@@ -212,13 +611,20 @@ class TimeTrackerApp:
             self.selected_project.set("")
         if persist_sort:
             self._save_config()
+        self._sync_start_enabled()
 
     def _save_config(self) -> None:
-        save_config({
-            "projects": self.projects,
-            "sort_mode": self._current_sort_mode(),
-            "excel_file": self.excel_file,
-        })
+        save_config(
+            {
+                "projects": self.projects,
+                "sort_mode": self._current_sort_mode(),
+                "excel_file": self.excel_file,
+                "launch_at_startup": self.launch_at_startup,
+                "always_on_top": self.always_on_top,
+                "window_geometry": self.window_geometry,
+                "hotkeys": self.hotkeys,
+            }
+        )
 
     def _on_sort_changed(self, _event: object = None) -> None:
         self._refresh_project_list(persist_sort=True)
@@ -226,29 +632,75 @@ class TimeTrackerApp:
     def _on_root_configure(self, event: tk.Event[tk.Misc]) -> None:
         if event.widget is self.root:
             self.project_picker.close_if_open()
+            self._schedule_geometry_save()
 
-    def _start_drag(self, event: tk.Event[tk.Misc]) -> None:
-        self._drag_x = event.x
-        self._drag_y = event.y
+    def _sync_start_enabled(self) -> None:
+        if self.tracking or self._writing:
+            return
+        has_project = bool(project_names(self.projects))
+        state: Literal["normal", "disabled"] = "normal" if has_project else "disabled"
+        bg = self._GREEN if has_project else self._SUBTLE
+        fg = self._ON_ACCENT if has_project else self._MUTED
+        self.start_btn.config(state=state, bg=bg, fg=fg)
 
-    def _drag(self, event: tk.Event[tk.Misc]) -> None:
-        x = self.root.winfo_x() + event.x - self._drag_x
-        y = self.root.winfo_y() + event.y - self._drag_y
-        self.root.geometry(f"+{x}+{y}")
+    def _set_project_controls_enabled(self, enabled: bool) -> None:
+        self.project_picker.set_enabled(enabled)
+        if self._manage_btn is not None:
+            self._manage_btn.config(state="normal" if enabled else "disabled")
 
     def _set_idle_controls(self) -> None:
-        self.start_btn.config(state="normal", bg=self._GREEN, fg="white")
+        self._timer.reset_idle()
+        self._writing = False
+        self._set_project_controls_enabled(True)
         self.stop_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
+        if self._pause_btn is not None:
+            self._pause_btn.config(
+                state="disabled",
+                bg=self._SUBTLE,
+                fg=self._MUTED,
+                text="Pause",
+            )
+        self._sync_start_enabled()
 
     def _set_busy_controls(self) -> None:
+        self._writing = True
         self.start_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
         self.stop_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
+        if self._pause_btn is not None:
+            self._pause_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
+        self._set_project_controls_enabled(False)
+
+    def _set_tracking_controls(self) -> None:
+        self._writing = False
+        self.start_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
+        self.stop_btn.config(state="normal", bg=self._RED, fg=self._ON_SOLID)
+        if self._pause_btn is not None:
+            if self.paused:
+                self._pause_btn.config(
+                    state="normal",
+                    bg=self._AMBER,
+                    fg=self._ON_SOLID,
+                    text="Reprendre",
+                )
+            else:
+                self._pause_btn.config(
+                    state="normal",
+                    bg=self._SUBTLE,
+                    fg=self._TEXT,
+                    text="Pause",
+                )
+        self._set_project_controls_enabled(False)
+
+    def _format_elapsed(self, seconds: float) -> str:
+        return format_elapsed(seconds)
+
+    def _persist_active(self) -> None:
+        self._timer.persist()
 
     def _ask_session_notes(self) -> str:
         dialog = tk.Toplevel(self.root)
         dialog.title("Notes (optionnel)")
-        dialog.configure(bg=self._BG)
-        dialog.attributes("-topmost", True)
+        apply_window(dialog, self._theme)
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -261,15 +713,16 @@ class TimeTrackerApp:
             text="Ajouter une note pour cette session :",
             bg=self._BG,
             fg=self._MUTED,
-            font=("Segoe UI", 9),
+            font=font_ui(9),
         ).pack(anchor="w", pady=(0, 8))
         note_var = tk.StringVar()
         entry = tk.Entry(
             body,
             textvariable=note_var,
-            font=("Segoe UI", 10),
+            font=font_ui(10),
             bg=self._SUBTLE,
             fg=self._TEXT,
+            insertbackground=self._TEXT,
             relief="flat",
             bd=0,
             highlightthickness=1,
@@ -289,15 +742,10 @@ class TimeTrackerApp:
 
         btn_row = tk.Frame(body, bg=self._BG)
         btn_row.pack(fill="x", pady=(12, 0))
-        tk.Button(
-            btn_row, text="Sans note", bg=self._SUBTLE, fg=self._TEXT, bd=0,
-            font=("Segoe UI", 9), cursor="hand2", padx=10, pady=6, command=skip,
-        ).pack(side="left")
-        tk.Button(
-            btn_row, text="OK", bg=self._GREEN, fg="white", bd=0,
-            font=("Segoe UI", 9, "bold"), cursor="hand2", padx=12, pady=6,
-            command=confirm,
-        ).pack(side="right")
+        make_button(btn_row, "Sans note", skip, variant="subtle", font_size=9, bold=False).pack(
+            side="left",
+        )
+        make_button(btn_row, "OK", confirm, variant="primary", font_size=9).pack(side="right")
         entry.bind("<Return>", lambda _event: confirm())
         dialog.bind("<Escape>", lambda _event: skip())
 
@@ -309,24 +757,40 @@ class TimeTrackerApp:
         return result["value"]
 
     def _start(self) -> None:
+        if self.tracking or self._writing:
+            return
         project = self.selected_project.get().strip()
         if project not in project_names(self.projects):
             messagebox.showwarning(
-                "Projet manquant", "Sélectionnez un projet valide dans la liste.",
+                "Projet manquant",
+                "Sélectionnez un projet valide dans la liste.",
+                parent=self.root,
             )
             return
-        self.tracking = True
-        self.start_time = datetime.now()
-        self.elapsed = 0
-        self._running = True
-        self._timer_gen += 1
-        tick_gen = self._timer_gen
-        self.start_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
-        self.stop_btn.config(state="normal", bg=self._RED, fg="white")
-        self.status_label.config(
-            text=f"● En cours — {self.selected_project.get()}", fg=self._GREEN,
-        )
+        tick_gen = self._timer.begin(project)
+        touch_project_last_used(self.projects, project)
+        self._save_config()
+        self._refresh_project_list()
+        self._set_tracking_controls()
+        self._set_status(f"En cours — {project}", kind="running")
+        self._persist_active()
         threading.Thread(target=self._tick, args=(tick_gen,), daemon=True).start()
+        logger.info("Session démarrée")
+
+    def _toggle_pause(self) -> None:
+        if not self.tracking or self.active_project is None:
+            return
+        if self.paused:
+            tick_gen = self._timer.resume_from_pause()
+            self._set_tracking_controls()
+            self._set_status(f"En cours — {self.active_project}", kind="running")
+            self._persist_active()
+            threading.Thread(target=self._tick, args=(tick_gen,), daemon=True).start()
+            return
+        self._timer.pause()
+        self._set_tracking_controls()
+        self._set_status(f"Pause — {self.active_project}", kind="paused")
+        self._persist_active()
 
     def _apply_timer_text(self, tick_gen: int, text: str) -> None:
         if tick_gen != self._timer_gen:
@@ -335,57 +799,281 @@ class TimeTrackerApp:
 
     def _tick(self, tick_gen: int) -> None:
         while self._running and tick_gen == self._timer_gen and self.start_time is not None:
-            self.elapsed = (datetime.now() - self.start_time).total_seconds()
-            hours = int(self.elapsed // 3600)
-            minutes = int((self.elapsed % 3600) // 60)
-            seconds = int(self.elapsed % 60)
-            text = f"{hours:02}:{minutes:02}:{seconds:02}"
+            elapsed = self._timer.tick_elapsed()
+            text = self._format_elapsed(elapsed)
             self.root.after(0, self._apply_timer_text, tick_gen, text)
+            if int(elapsed) % 15 == 0:
+                self.root.after(0, self._persist_active)
             time.sleep(1)
 
     def _stop(self) -> None:
-        if not self.tracking or self.start_time is None:
+        if not self.tracking or self.active_project is None:
             return
-        self._running = False
-        self.tracking = False
-        self._timer_gen += 1
-        end_time = datetime.now()
-        project = self.selected_project.get()
-        session_start = self.start_time
-        elapsed = self.elapsed
+        project, session_start, end_time, elapsed = self._timer.stop_clock()
 
         self._set_busy_controls()
-        self.status_label.config(text="● Enregistrement…", fg=self._MUTED)
+        self._set_status("Enregistrement…", kind="busy")
 
         notes = self._ask_session_notes()
-        duration_label = format_session_duration(elapsed)
+        self._write_session_async(project, session_start, end_time, notes, elapsed)
 
-        try:
-            log_session(project, session_start, end_time, notes, self.excel_file)
-        except ExcelWriteError as exc:
-            self._set_idle_controls()
-            self.timer_label.config(text="00:00:00")
-            self.status_label.config(text="⚠ Non enregistré", fg=self._RED)
-            messagebox.showerror(
-                "Enregistrement impossible",
-                f"La session n'a pas été écrite dans Excel.\n\n{exc}",
-                parent=self.root,
+    def _write_session_async(
+        self,
+        project: str,
+        session_start: datetime,
+        end_time: datetime,
+        notes: str,
+        elapsed: float,
+        *,
+        from_pending: bool = False,
+    ) -> None:
+        def worker() -> None:
+            try:
+                write_session_sync(project, session_start, end_time, notes, self.excel_file)
+            except ExcelWriteError as exc:
+                self.root.after(
+                    0,
+                    self._on_write_failure,
+                    project,
+                    session_start,
+                    end_time,
+                    notes,
+                    elapsed,
+                    str(exc),
+                    from_pending,
+                )
+                return
+            self.root.after(
+                0,
+                self._on_write_success,
+                project,
+                elapsed,
+                from_pending,
             )
-            if "vrai .xlsx" in str(exc) or "illisible ou corrompu" in str(exc):
-                self._offer_recreate_excel()
-            self.status_label.config(text="● En attente", fg=self._MUTED)
-            return
 
+        run_in_thread(worker)
+
+    def _on_write_success(
+        self,
+        project: str,
+        elapsed: float,
+        from_pending: bool,
+    ) -> None:
+        self._writing = False
         self._set_idle_controls()
         self.timer_label.config(text="00:00:00")
-        self.status_label.config(text="✔ Session enregistrée", fg=self._ACCENT)
-        messagebox.showinfo(
-            "Session enregistrée",
-            f"✔ {project}\nDurée : {duration_label}\n\nEnregistré dans :\n{self.excel_file}\n\n"
-            "Si Calc/Excel était ouvert : fermez puis rouvrez le fichier pour voir la ligne.",
+        duration_label = format_session_duration(elapsed)
+        self._set_status("Session enregistrée", kind="ok")
+        self._update_retry_button()
+        if not from_pending:
+            messagebox.showinfo(
+                "Session enregistrée",
+                f"✔ {project}\nDurée : {duration_label}\n\nEnregistré dans :\n{self.excel_file}\n\n"
+                "Si Calc/Excel était ouvert : fermez puis rouvrez le fichier pour voir la ligne.",
+                parent=self.root,
+            )
+        self._set_status("En attente", kind="idle")
+        logger.info("Session enregistrée")
+
+    def _on_write_failure(
+        self,
+        project: str,
+        session_start: datetime,
+        end_time: datetime,
+        notes: str,
+        elapsed: float,
+        error: str,
+        from_pending: bool,
+    ) -> None:
+        self._writing = False
+        if not from_pending:
+            enqueue_pending_session(project, session_start, end_time, notes)
+        self._set_idle_controls()
+        self.timer_label.config(text="00:00:00")
+        self._set_status("Non enregistré — en file", kind="error")
+        self._update_retry_button()
+        messagebox.showerror(
+            "Enregistrement impossible",
+            f"La session n'a pas été écrite dans Excel.\n"
+            f"Elle est conservée localement pour réessai.\n\n{error}",
             parent=self.root,
         )
-        self.status_label.config(text="● En attente", fg=self._MUTED)
+        if "vrai .xlsx" in error or "illisible ou corrompu" in error:
+            self._offer_recreate_excel()
+        self._set_status("En attente de réessai", kind="error")
+        logger.warning("Échec écriture Excel")
+
+    def _update_retry_button(self) -> None:
+        pending = load_pending_sessions()
+        if self._retry_btn is None:
+            return
+        if pending:
+            self._retry_btn.config(
+                state="normal",
+                text=f"↺  Réessayer ({len(pending)})",
+            )
+            if not bool(self._retry_btn.winfo_ismapped()):
+                if self._sessions_divider is not None:
+                    self._retry_btn.pack(
+                        fill="x",
+                        pady=(14, 0),
+                        before=self._sessions_divider,
+                    )
+                else:
+                    self._retry_btn.pack(fill="x", pady=(14, 0))
+        else:
+            self._retry_btn.pack_forget()
+
+    def _retry_pending(self) -> None:
+        self._flush_pending_async(silent_if_empty=False, quiet=False)
+
+    def _flush_pending_async(self, *, silent_if_empty: bool, quiet: bool = False) -> None:
+        pending = load_pending_sessions()
+        if not pending:
+            if not silent_if_empty and not quiet:
+                messagebox.showinfo(
+                    "File d'attente",
+                    "Aucune session en attente.",
+                    parent=self.root,
+                )
+            self._update_retry_button()
+            return
+        if self._writing or self.tracking:
+            return
+        self._set_busy_controls()
+        self._set_status("Réessai enregistrement…", kind="busy")
+        excel_file = self.excel_file
+
+        def worker() -> None:
+            remaining, errors = flush_pending_sync(pending, excel_file)
+            self.root.after(0, lambda: self._on_flush_done(remaining, errors, quiet=quiet))
+
+        run_in_thread(worker)
+
+    def _on_flush_done(
+        self,
+        remaining: list[PendingSession],
+        errors: list[str],
+        *,
+        quiet: bool = False,
+    ) -> None:
+        self._writing = False
+        self._set_idle_controls()
+        self._update_retry_button()
+        if remaining:
+            self._set_status("En attente de réessai", kind="error")
+            if not quiet:
+                detail = errors[0] if errors else "Échec inconnu"
+                messagebox.showerror(
+                    "Réessai incomplet",
+                    f"{len(remaining)} session(s) restent en file.\n\n{detail}",
+                    parent=self.root,
+                )
+            return
+        self._set_status("File enregistrée", kind="ok")
+        if not quiet:
+            messagebox.showinfo(
+                "Enregistrement",
+                "Toutes les sessions en attente ont été écrites dans Excel.",
+                parent=self.root,
+            )
+        self._set_status("En attente", kind="idle")
+
+    def _recover_active_session(self) -> None:
+        active = load_active_session()
+        if active is None:
+            return
+        project = active["project"]
+        if project not in project_names(self.projects):
+            clear_active_session()
+            return
+        choice = messagebox.askyesnocancel(
+            "Session interrompue",
+            f"Une session « {project} » était en cours.\n\n"
+            "Oui = reprendre\nNon = clôturer maintenant\nAnnuler = abandonner",
+            parent=self.root,
+        )
+        if choice is None:
+            clear_active_session()
+            return
+        start = datetime.fromisoformat(active["start"])
+        accumulated = float(active["accumulated_seconds"])
+        if active["paused"]:
+            elapsed = accumulated
+        else:
+            resume_raw = active.get("resume_at")
+            if resume_raw:
+                try:
+                    resume_at = datetime.fromisoformat(resume_raw)
+                    elapsed = accumulated + max(
+                        0.0,
+                        (datetime.now() - resume_at).total_seconds(),
+                    )
+                except ValueError:
+                    elapsed = accumulated + max(
+                        0.0,
+                        (datetime.now() - start).total_seconds(),
+                    )
+            else:
+                elapsed = accumulated + max(
+                    0.0,
+                    (datetime.now() - start).total_seconds(),
+                )
+        if choice is False:
+            end_time = datetime.now()
+            session_start = datetime.fromtimestamp(end_time.timestamp() - elapsed)
+            clear_active_session()
+            notes = self._ask_session_notes()
+            self._set_busy_controls()
+            self._write_session_async(project, session_start, end_time, notes, elapsed)
+            return
+        self.selected_project.set(project)
+        tick_gen = self._timer.restore_running(project, elapsed)
+        self.timer_label.config(text=self._format_elapsed(elapsed))
+        self._set_tracking_controls()
+        self._set_status(f"Reprise — {project}", kind="running")
+        self._persist_active()
+        threading.Thread(target=self._tick, args=(tick_gen,), daemon=True).start()
+
+    def _on_close_request(self) -> None:
+        if self._quitting:
+            return
+        if self.tracking:
+            if not messagebox.askyesno(
+                "Session en cours",
+                "Une session est en cours. Arrêter et enregistrer avant de quitter ?",
+                parent=self.root,
+            ):
+                return
+            self._stop()
+            return
+        self.root.withdraw()
+
+    def _quit_app(self) -> None:
+        if self._quitting:
+            return
+        if self.tracking:
+            if not messagebox.askyesno(
+                "Quitter",
+                "Session en cours : l'arrêter et l'enregistrer avant de quitter ?",
+                parent=self.root,
+            ):
+                self._show_window()
+                return
+            self._stop()
+            # Leave quit to user after write; mark quitting after write is complex —
+            # if still tracking after stop kickoff, wait.
+            if self._writing:
+                self.root.after(500, self._quit_app)
+                return
+        self._quitting = True
+        self._capture_geometry()
+        if self._global_hotkeys is not None:
+            self._global_hotkeys.stop()
+        if self._tray is not None:
+            self._tray.stop()
+        clear_active_session()
+        self.root.destroy()
 
     def _offer_recreate_excel(self) -> None:
         if not messagebox.askyesno(
@@ -420,21 +1108,29 @@ class TimeTrackerApp:
         messagebox.showinfo(
             "Fichier prêt",
             f"Nouveau fichier créé :\n{excel_path}\n\n"
-            "Relancez Start → Stop pour enregistrer la session.",
+            "Utilisez « Réessayer l'enregistrement » pour écrire la session en file.",
             parent=self.root,
         )
 
     def _open_manage(self) -> None:
+        if self.tracking:
+            return
         ManageProjectsDialog(
             self.root,
             self.projects,
             self._current_sort_mode(),
             self.excel_file,
             self._on_projects_updated,
+            launch_at_startup=self.launch_at_startup,
+            always_on_top=self.always_on_top,
+            window_geometry=self.window_geometry,
+            hotkeys=self.hotkeys,
         )
 
     def _on_projects_updated(
-        self, new_projects: list[ProjectEntry], sort_mode: SortMode,
+        self,
+        new_projects: list[ProjectEntry],
+        sort_mode: SortMode,
     ) -> None:
         self.projects = new_projects
         self.sort_mode.set(SORT_LABELS[sort_mode])
@@ -455,3 +1151,91 @@ class TimeTrackerApp:
 
     def _open_excel(self) -> None:
         open_excel_file(self.excel_file, parent=self.root)
+
+    def _open_today(self) -> None:
+        TodayHistoryDialog(self.root, self.excel_file, self.projects)
+
+    def _open_period(self) -> None:
+        PeriodHistoryDialog(self.root, self.excel_file, self.projects)
+
+    def _open_manual(self) -> None:
+        if not self.projects:
+            messagebox.showwarning(
+                "Projets",
+                "Ajoutez un projet avant la saisie manuelle.",
+                parent=self.root,
+            )
+            return
+        ManualSessionDialog(self.root, self.projects, self._on_manual_submit)
+
+    def _on_manual_submit(
+        self,
+        project: str,
+        start: datetime,
+        end: datetime,
+        notes: str,
+    ) -> None:
+        elapsed = (end - start).total_seconds()
+        self._set_busy_controls()
+        self._set_status("Enregistrement…", kind="busy")
+        self._write_session_async(project, start, end, notes, elapsed)
+
+    def _open_about(self) -> None:
+        AboutDialog(self.root, hotkeys=self.hotkeys)
+
+    def _open_settings(self) -> None:
+        # Pause l'écoute globale pour ne pas déclencher d'actions pendant la capture.
+        if self._global_hotkeys is not None:
+            self._global_hotkeys.stop()
+        self._unbind_tk_hotkeys()
+        dialog = SettingsDialog(
+            self.root,
+            launch_at_startup=self.launch_at_startup,
+            always_on_top=self.always_on_top,
+            hotkeys=self.hotkeys,
+            startup_available=startup_available(),
+            startup_label=startup_label(),
+            on_save=self._on_settings_saved,
+        )
+
+        def _resume_hotkeys(event: tk.Event[tk.Misc]) -> None:
+            if event.widget is dialog and not self._quitting:
+                self._setup_hotkeys()
+
+        dialog.bind("<Destroy>", _resume_hotkeys)
+
+    def _on_settings_saved(
+        self,
+        launch_at_startup: bool,
+        always_on_top: bool,
+        hotkeys: HotkeysConfig,
+    ) -> None:
+        self.launch_at_startup = launch_at_startup
+        self.always_on_top = always_on_top
+        self.hotkeys = parse_hotkeys(hotkeys)
+        self._apply_topmost()
+        self._save_config()
+        if startup_available():
+            exe_path = os.path.abspath(sys.executable) if getattr(sys, "frozen", False) else None
+            try:
+                apply_startup_preference(launch_at_startup, exe_path)
+            except OSError as exc:
+                messagebox.showwarning(
+                    "Démarrage",
+                    f"Impossible d'appliquer le démarrage automatique :\n{exc}",
+                    parent=self.root,
+                )
+                logger.warning("Échec apply_startup_preference: %s", exc)
+                return
+            registered = is_startup_registered()
+            if launch_at_startup and not registered:
+                messagebox.showwarning(
+                    "Démarrage",
+                    "La préférence a été enregistrée, mais l'inscription OS a échoué.",
+                    parent=self.root,
+                )
+            logger.info(
+                "Préférence démarrage=%s (actif=%s)",
+                launch_at_startup,
+                registered,
+            )
