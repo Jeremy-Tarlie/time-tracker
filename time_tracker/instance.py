@@ -20,17 +20,17 @@ class InstanceLockError(RuntimeError):
 
 
 def _lock_windows(handle: IO[str]) -> None:
-    import msvcrt
-
-    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    msvcrt_mod = importlib.import_module("msvcrt")
+    locking = cast(Callable[[int, int, int], None], msvcrt_mod.locking)
+    locking(handle.fileno(), int(msvcrt_mod.LK_NBLCK), 1)
 
 
 def _unlock_windows(handle: IO[str]) -> None:
-    import msvcrt
-
+    msvcrt_mod = importlib.import_module("msvcrt")
+    locking = cast(Callable[[int, int, int], None], msvcrt_mod.locking)
     try:
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        locking(handle.fileno(), int(msvcrt_mod.LK_UNLCK), 1)
     except OSError:
         pass
 
@@ -61,7 +61,7 @@ def acquire_instance_lock(path: str = INSTANCE_LOCK_FILE) -> TextIO:
         handle.truncate()
         handle.write(str(os.getpid()))
         handle.flush()
-        if os.name == "nt":
+        if sys.platform == "win32":
             _lock_windows(handle)
         else:
             _lock_posix(handle)
@@ -79,7 +79,7 @@ def release_instance_lock() -> None:
     if handle is None:
         return
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             _unlock_windows(handle)
         else:
             _unlock_posix(handle)

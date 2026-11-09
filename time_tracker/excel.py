@@ -645,7 +645,7 @@ def open_excel_file(excel_path: str, *, parent: tk.Misc | None = None) -> bool:
         return False
     ensure_excel(path)
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             os.startfile(path)
         elif sys.platform == "darwin":
             subprocess.run(["open", path], check=False)
