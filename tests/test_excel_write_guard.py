@@ -60,6 +60,11 @@ class TestExcelWriteGuard(unittest.TestCase):
         self.assertIn(r"C:\data\~$heures_projet.xlsx", locks)
         self.assertIn(r"C:\data\.~lock.heures_projet.xlsx#", locks)
 
+    def test_lock_paths_posix_style(self) -> None:
+        locks = _excel_lock_paths("/tmp/data/heures_projet.xlsx")
+        self.assertIn("/tmp/data/~$heures_projet.xlsx", locks)
+        self.assertIn("/tmp/data/.~lock.heures_projet.xlsx#", locks)
+
     def test_assert_ooxml_rejects_ole_compound_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fake = Path(tmp) / "fake.xlsx"

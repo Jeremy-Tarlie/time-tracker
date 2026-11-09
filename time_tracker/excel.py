@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tkinter as tk
 from datetime import date, datetime, timedelta
+from pathlib import PurePath, PurePosixPath, PureWindowsPath
 from tkinter import messagebox
 
 from openpyxl import Workbook, load_workbook
@@ -91,11 +92,20 @@ def _next_session_row(ws: Worksheet) -> int:
     return row_idx
 
 
+def _pure_path_for(excel_path: str) -> PurePath:
+    """Choisit le parseur de chemin adapté (chemins Windows analysables sous Linux CI)."""
+    if "\\" in excel_path or (len(excel_path) >= 2 and excel_path[1] == ":"):
+        return PureWindowsPath(excel_path)
+    return PurePosixPath(excel_path)
+
+
 def _excel_lock_paths(excel_path: str) -> list[str]:
-    directory, filename = os.path.split(excel_path)
+    pure = _pure_path_for(excel_path)
+    filename = pure.name
+    directory = pure.parent
     return [
-        os.path.join(directory, f"~${filename}"),
-        os.path.join(directory, f".~lock.{filename}#"),
+        str(directory / f"~${filename}"),
+        str(directory / f".~lock.{filename}#"),
     ]
 
 
