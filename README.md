@@ -20,6 +20,7 @@ Application de suivi du temps par projet. Interface compacte, system tray, expor
 - Notes optionnelles à la fin de chaque session
 - **Windows** : installation AppData, raccourcis et démarrage Windows en **opt-in**
 - Mode **portable** (`portable.flag` ou `--portable`)
+- **Mises à jour automatiques** (binaires uniquement) via GitHub Releases
 
 ## Téléchargement
 
@@ -88,6 +89,17 @@ En mode développement, les données (`heures_projet.xlsx`, `projects.json`) son
 ```
 
 L’exécutable est généré dans `dist/`.
+
+## Mises à jour automatiques
+
+Les binaires publiés sur [Releases](https://github.com/Jeremy-Tarlie/time-tracker/releases) se mettent à jour seuls :
+
+- **Au démarrage** : si une version plus récente existe, elle est téléchargée et l’app redémarre (sans confirmation).
+- **Pendant l’utilisation** : un bouton **Mise à jour** apparaît ; si un chrono ou une écriture Excel est en cours, une confirmation propose Maintenant / Plus tard.
+
+Le mode développement (`python main.py`) ne vérifie pas les mises à jour.
+
+> macOS : le binaire n’est pas signé ; Gatekeeper peut demander une autorisation manuelle après une mise à jour.
 
 ## Publier une nouvelle version
 

@@ -5,7 +5,7 @@ import tkinter as tk
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import cast
+from typing import Literal, cast
 
 from time_tracker.config import project_names, save_config, sort_projects
 from time_tracker.constants import (
@@ -873,6 +873,70 @@ class AboutDialog(tk.Toplevel):
             bold=False,
         ).pack(anchor="e", pady=(16, 0))
         self.geometry("420x420")
+
+
+class UpdatePromptDialog(tk.Toplevel):
+    """Demande si la mise à jour doit s'appliquer maintenant (session active)."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        remote_version: str,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Mise à jour")
+        self.result: Literal["now", "later"] | None = None
+        apply_window(self)
+        self.resizable(False, False)
+        self.grab_set()
+        t = THEME
+        dialog_header(self, "Mise à jour disponible")
+        body = tk.Frame(self, bg=t.bg, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+        tk.Label(
+            body,
+            text=(
+                f"La version {remote_version} est prête.\n\n"
+                "Une session est en cours (chrono ou écriture Excel).\n"
+                "Mettre à jour maintenant redémarrera l'application "
+                "(la session sera reprise au prochain démarrage)."
+            ),
+            bg=t.bg,
+            fg=t.text,
+            font=font_ui(9),
+            justify="left",
+            wraplength=360,
+        ).pack(anchor="w")
+        actions = tk.Frame(body, bg=t.bg)
+        actions.pack(fill="x", pady=(18, 0))
+        make_button(
+            actions,
+            "Plus tard",
+            self._later,
+            variant="subtle",
+            font_size=9,
+            bold=False,
+        ).pack(side="right")
+        make_button(
+            actions,
+            "Maintenant",
+            self._now,
+            variant="primary",
+            font_size=9,
+            bold=False,
+        ).pack(side="right", padx=(0, 8))
+        self.protocol("WM_DELETE_WINDOW", self._later)
+        self.geometry("420x240")
+        self.wait_window(self)
+
+    def _now(self) -> None:
+        self.result = "now"
+        self.destroy()
+
+    def _later(self) -> None:
+        self.result = "later"
+        self.destroy()
 
 
 class EditSessionDialog(tk.Toplevel):

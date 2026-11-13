@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 import tkinter as tk
@@ -10,6 +10,7 @@ from time_tracker.install import ensure_installed
 from time_tracker.instance import ensure_single_instance
 from time_tracker.logging_setup import setup_logging
 from time_tracker.paths import refresh_data_paths
+from time_tracker.updater import try_startup_auto_update
 
 
 def _enable_dpi_awareness() -> None:
@@ -45,6 +46,8 @@ def main() -> None:
         )
         root.destroy()
         return
+
+    try_startup_auto_update()
 
     result = load_config_detailed()
 

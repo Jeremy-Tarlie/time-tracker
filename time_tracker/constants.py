@@ -84,3 +84,13 @@ PENDING_SESSIONS_NAME = "pending_sessions.json"
 ACTIVE_SESSION_NAME = "active_session.json"
 INSTANCE_LOCK_NAME = "timetracker.lock"
 PORTABLE_FLAG_NAME = "portable.flag"
+
+GITHUB_REPO = "Jeremy-Tarlie/time-tracker"
+GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+UPDATE_ASSET_WINDOWS = "TimeTracker-windows-x64.exe"
+UPDATE_ASSET_LINUX = "TimeTracker-linux-x64"
+UPDATE_ASSET_MACOS_ARM64 = "TimeTracker-macos-arm64"
+UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+UPDATE_CHECK_TIMEOUT_S = 15
+UPDATE_DOWNLOAD_TIMEOUT_S = 180
+UPDATE_MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024

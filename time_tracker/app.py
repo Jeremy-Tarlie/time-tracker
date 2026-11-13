@@ -22,6 +22,7 @@ from time_tracker.constants import (
     DEFAULT_SORT,
     SORT_LABELS,
     SORT_OPTIONS,
+    UPDATE_CHECK_INTERVAL_MS,
     HotkeyAction,
     HotkeysConfig,
     PendingSession,
@@ -36,6 +37,7 @@ from time_tracker.dialogs import (
     PeriodHistoryDialog,
     SettingsDialog,
     TodayHistoryDialog,
+    UpdatePromptDialog,
 )
 from time_tracker.excel import (
     ExcelWriteError,
@@ -50,6 +52,7 @@ from time_tracker.hotkeys import (
     parse_hotkeys,
 )
 from time_tracker.logging_setup import get_logger
+from time_tracker.paths import is_frozen
 from time_tracker.session_store import (
     clear_active_session,
     enqueue_pending_session,
@@ -76,6 +79,14 @@ from time_tracker.theme import (
 )
 from time_tracker.timer_controller import TimerState, format_elapsed
 from time_tracker.tray import TrayController
+from time_tracker.updater import (
+    UpdateAvailability,
+    UpdateCheckResult,
+    check_for_update,
+    decide_apply_prompt,
+    download_update,
+    prepare_and_relaunch,
+)
 from time_tracker.widgets import SearchableDropdown
 
 logger = get_logger()
@@ -119,6 +130,11 @@ class TimeTrackerApp:
         self._sessions_divider: tk.Frame | None = None
         self._status_dot: tk.Label | None = None
         self._status_wrap: tk.Frame | None = None
+        self._update_btn: tk.Button | None = None
+        self._pending_update: UpdateAvailability | None = None
+        self._update_check_job: str | None = None
+        self._update_apply_job: str | None = None
+        self._update_applying = False
 
         self._build_ui()
         self._setup_hotkeys()
@@ -172,6 +188,8 @@ class TimeTrackerApp:
         self._recover_active_session()
         self._flush_pending_async(silent_if_empty=True, quiet=True)
         self._schedule_pending_retry()
+        if is_frozen():
+            self._start_update_checks()
 
     def _setup_tray(self) -> None:
         def schedule_show() -> None:
@@ -406,6 +424,18 @@ class TimeTrackerApp:
         )
         settings_btn.configure(fg=t.accent, activeforeground=t.accent_dim)
         settings_btn.pack(side="right", padx=(0, 12), pady=12)
+        self._update_btn = make_button(
+            brand,
+            "Mise à jour",
+            self._on_update_clicked,
+            variant="link",
+            font_size=9,
+            bold=False,
+            padx=10,
+            pady=4,
+        )
+        self._update_btn.configure(fg=t.warning, activeforeground=t.warning)
+        # Caché jusqu'à détection d'une version plus récente (frozen).
         brand_text = tk.Frame(brand, bg=t.surface)
         brand_text.pack(side="left", fill="both", expand=True, padx=(14, 8), pady=12)
         tk.Label(
@@ -1035,6 +1065,166 @@ class TimeTrackerApp:
         self._persist_active()
         threading.Thread(target=self._tick, args=(tick_gen,), daemon=True).start()
 
+    def _start_update_checks(self) -> None:
+        self._run_update_check_async()
+        self._schedule_update_check()
+
+    def _schedule_update_check(self) -> None:
+        if self._quitting:
+            return
+        if self._update_check_job is not None:
+            try:
+                self.root.after_cancel(self._update_check_job)
+            except tk.TclError as exc:
+                logger.warning("update.cancel_job_failed reason=%s", type(exc).__name__)
+        self._update_check_job = self.root.after(
+            UPDATE_CHECK_INTERVAL_MS,
+            self._on_scheduled_update_check,
+        )
+
+    def _on_scheduled_update_check(self) -> None:
+        self._update_check_job = None
+        if self._quitting:
+            return
+        self._run_update_check_async()
+        self._schedule_update_check()
+
+    def _run_update_check_async(self) -> None:
+        def worker() -> None:
+            result = check_for_update()
+            if self._quitting:
+                return
+
+            def deliver() -> None:
+                self._on_update_check_result(result)
+
+            self.root.after(0, deliver)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_check_result(self, result: UpdateCheckResult) -> None:
+        if self._quitting:
+            return
+        if result.status == "error":
+            # Conserve le bouton / état déjà connu si le réseau échoue.
+            return
+        if result.status == "available" and result.availability is not None:
+            self._pending_update = result.availability
+            self._show_update_button(result.availability.remote_version)
+            return
+        self._pending_update = None
+        self._hide_update_button()
+
+    def _show_update_button(self, remote_version: str) -> None:
+        btn = self._update_btn
+        if btn is None:
+            return
+        btn.configure(text=f"Mise à jour v{remote_version}")
+        if not btn.winfo_ismapped():
+            btn.pack(side="right", padx=(0, 4), pady=12)
+
+    def _hide_update_button(self) -> None:
+        btn = self._update_btn
+        if btn is None:
+            return
+        if btn.winfo_ismapped():
+            btn.pack_forget()
+
+    def _on_update_clicked(self) -> None:
+        if self._update_applying:
+            return
+        availability = self._pending_update
+        if availability is None:
+            return
+        decision = decide_apply_prompt(tracking=self.tracking, writing=self._writing)
+        if decision == "ask_user":
+            dialog = UpdatePromptDialog(
+                self.root,
+                remote_version=availability.remote_version,
+            )
+            if dialog.result != "now":
+                return
+        self._begin_apply_update()
+
+    def _begin_apply_update(self) -> None:
+        if self._quitting or self._update_applying:
+            return
+        if self._writing:
+            self._update_apply_job = self.root.after(200, self._begin_apply_update)
+            return
+        if self.tracking:
+            self._persist_active()
+        availability = self._pending_update
+        if availability is None:
+            return
+
+        self._update_applying = True
+        if self._update_btn is not None:
+            self._update_btn.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                dest = download_update(availability)
+            except Exception as exc:
+                logger.warning("update.apply_failed reason=%s", type(exc).__name__)
+                self.root.after(0, self._on_update_apply_failed)
+                return
+            if dest is None:
+                self.root.after(0, self._on_update_apply_failed)
+                return
+
+            def finish() -> None:
+                self._finish_apply_update(dest)
+
+            self.root.after(0, finish)
+
+        self._set_status("Mise à jour en cours…", kind="busy")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_apply_update(self, new_path: str) -> None:
+        if self._quitting:
+            return
+        if self._writing:
+
+            def retry() -> None:
+                self._finish_apply_update(new_path)
+
+            self._update_apply_job = self.root.after(200, retry)
+            return
+        if self.tracking:
+            self._persist_active()
+        try:
+            prepare_and_relaunch(new_path)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            logger.warning("update.apply_failed reason=%s", type(exc).__name__)
+            self._on_update_apply_failed()
+
+    def _on_update_apply_failed(self) -> None:
+        self._update_applying = False
+        if self._update_btn is not None:
+            self._update_btn.configure(state="normal")
+        if self._quitting:
+            return
+        messagebox.showwarning(
+            "Mise à jour",
+            "Impossible de télécharger ou d'appliquer la mise à jour.\nRéessayez plus tard.",
+            parent=self.root,
+        )
+        self._set_status("Mise à jour échouée", kind="error")
+
+    def _cancel_update_jobs(self) -> None:
+        for job_attr in ("_update_check_job", "_update_apply_job"):
+            job = getattr(self, job_attr)
+            if job is None:
+                continue
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError as exc:
+                logger.warning("update.cancel_job_failed reason=%s", type(exc).__name__)
+            setattr(self, job_attr, None)
+
     def _on_close_request(self) -> None:
         if self._quitting:
             return
@@ -1067,6 +1257,7 @@ class TimeTrackerApp:
                 self.root.after(500, self._quit_app)
                 return
         self._quitting = True
+        self._cancel_update_jobs()
         self._capture_geometry()
         if self._global_hotkeys is not None:
             self._global_hotkeys.stop()
