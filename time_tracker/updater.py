@@ -37,7 +37,14 @@ ApplyDecision = Literal["apply_now", "ask_user"]
 UpdateCheckStatus = Literal["available", "up_to_date", "error", "unsupported"]
 
 _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)$", re.IGNORECASE)
-_ALLOWED_DOWNLOAD_HOSTS = frozenset({"github.com", "objects.githubusercontent.com"})
+# GitHub redirige les assets vers objects.* (ancien) ou release-assets.* (actuel).
+_ALLOWED_DOWNLOAD_HOSTS = frozenset(
+    {
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+)
 _RELEASE_DOWNLOAD_PREFIX = f"/{GITHUB_REPO}/releases/download/"
 
 

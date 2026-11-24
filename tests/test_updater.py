@@ -15,11 +15,13 @@ from time_tracker.constants import (
 )
 from time_tracker.updater import (
     UpdateCheckResult,
+    _is_allowed_download_url,
     asset_name_for_platform,
     build_posix_helper_script,
     build_windows_helper_script,
     check_for_update,
     decide_apply_prompt,
+    download_to,
     fetch_latest_release,
     is_newer,
     parse_version,
@@ -268,6 +270,77 @@ class TestCheckForUpdate(unittest.TestCase):
                 timeout_s=1.0,
             )
         self.assertEqual(result.status, "error")
+
+
+class TestAllowedDownloadUrl(unittest.TestCase):
+    def test_github_release_asset_url_allowed(self) -> None:
+        url = (
+            "https://github.com/Jeremy-Tarlie/time-tracker/releases/download/v1.7.1/"
+            f"{UPDATE_ASSET_WINDOWS}"
+        )
+        self.assertTrue(_is_allowed_download_url(url))
+
+    def test_release_assets_cdn_allowed(self) -> None:
+        url = (
+            "https://release-assets.githubusercontent.com/github-production-release-asset/"
+            "12345/TimeTracker-windows-x64.exe?sp=r&sv=2026-01-01"
+        )
+        self.assertTrue(_is_allowed_download_url(url))
+
+    def test_objects_cdn_allowed(self) -> None:
+        url = "https://objects.githubusercontent.com/github-production-release-asset/abc"
+        self.assertTrue(_is_allowed_download_url(url))
+
+    def test_other_host_rejected(self) -> None:
+        self.assertFalse(_is_allowed_download_url(f"https://evil.example/{UPDATE_ASSET_WINDOWS}"))
+
+
+class TestDownloadToRedirect(unittest.TestCase):
+    def test_follows_redirect_to_release_assets_cdn(self) -> None:
+        import tempfile
+        from email.message import Message
+        from pathlib import Path
+
+        source = (
+            "https://github.com/Jeremy-Tarlie/time-tracker/releases/download/v1.7.1/"
+            f"{UPDATE_ASSET_WINDOWS}"
+        )
+        cdn = (
+            "https://release-assets.githubusercontent.com/github-production-release-asset/"
+            f"1/{UPDATE_ASSET_WINDOWS}"
+        )
+        headers = Message()
+        headers["Location"] = cdn
+        redirect = urllib.error.HTTPError(
+            url=source,
+            code=302,
+            msg="Found",
+            hdrs=headers,
+            fp=None,
+        )
+        ok_response = MagicMock()
+        ok_response.status = 200
+        ok_response.getcode.return_value = 200
+        ok_response.geturl.return_value = cdn
+        ok_response.headers = {}
+        ok_response.read.side_effect = [b"binary-payload", b""]
+        ok_response.__enter__.return_value = ok_response
+        ok_response.__exit__.return_value = False
+
+        calls = {"n": 0}
+
+        def _open_side_effect(request: object, *, timeout_s: float) -> object:
+            _ = timeout_s
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise redirect
+            return ok_response
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = str(Path(tmp) / "TimeTracker.exe.new")
+            with patch("time_tracker.updater._open_no_redirect", side_effect=_open_side_effect):
+                self.assertTrue(download_to(source, dest, timeout_s=1.0, max_bytes=1024))
+            self.assertEqual(Path(dest).read_bytes(), b"binary-payload")
 
 
 class TestBuildHelperScripts(unittest.TestCase):
