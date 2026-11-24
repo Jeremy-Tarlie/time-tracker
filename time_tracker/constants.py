@@ -76,7 +76,7 @@ SORT_OPTIONS: list[tuple[str, SortMode]] = [
 ]
 SORT_LABELS: dict[SortMode, str] = {mode: label for label, mode in SORT_OPTIONS}
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 APP_NAME = "Time Tracker"
 REGISTRY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REGISTRY_NAME = "TimeTracker"

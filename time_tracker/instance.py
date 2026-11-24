@@ -50,12 +50,24 @@ def _unlock_posix(handle: IO[str]) -> None:
         pass
 
 
-def acquire_instance_lock(path: str = INSTANCE_LOCK_FILE) -> TextIO:
-    global _lock_handle
+def _safe_close(handle: TextIO) -> None:
+    try:
+        handle.close()
+    except OSError:
+        pass
+
+
+def _acquire_instance_lock_once(path: str) -> TextIO:
     parent = os.path.dirname(path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
-    handle = open(path, "a+", encoding="utf-8")
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as exc:
+            raise InstanceLockError("Impossible d'accéder au verrou d'instance.") from exc
+    try:
+        handle = open(path, "a+", encoding="utf-8")
+    except OSError as exc:
+        raise InstanceLockError("Impossible d'accéder au verrou d'instance.") from exc
     try:
         handle.seek(0)
         handle.truncate()
@@ -66,8 +78,28 @@ def acquire_instance_lock(path: str = INSTANCE_LOCK_FILE) -> TextIO:
         else:
             _lock_posix(handle)
     except OSError as exc:
-        handle.close()
+        # close() peut aussi lever PermissionError sur Windows — ne pas masquer.
+        _safe_close(handle)
         raise InstanceLockError("Time Tracker est déjà en cours d'exécution.") from exc
+    return handle
+
+
+def acquire_instance_lock(path: str = INSTANCE_LOCK_FILE) -> TextIO:
+    """Acquiert le verrou fichier. Lève ``InstanceLockError`` si indisponible.
+
+    En cas de PermissionError sur un lock orphelin (ACL / AV), tente une
+    suppression puis un second essai avant d'abandonner.
+    """
+    global _lock_handle
+    try:
+        handle = _acquire_instance_lock_once(path)
+    except InstanceLockError:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as exc:
+            raise InstanceLockError("Time Tracker est déjà en cours d'exécution.") from exc
+        handle = _acquire_instance_lock_once(path)
     _lock_handle = handle
     atexit.register(release_instance_lock)
     return handle
