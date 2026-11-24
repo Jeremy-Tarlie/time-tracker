@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from time_tracker.constants import APP_NAME, APP_VERSION
+from time_tracker.logging_setup import get_logger
 from time_tracker.paths import (
     INSTALL_DIR,
     INSTALL_EXE,
@@ -36,6 +37,7 @@ __all__ = [
     "ensure_installed",
     "is_startup_registered",
     "register_startup",
+    "replace_installed_exe",
     "unregister_startup",
 ]
 
@@ -82,6 +84,82 @@ def _file_hash(path: str) -> str:
         for chunk in iter(lambda: handle.read(8192), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _binaries_identical(left: str, right: str) -> bool:
+    if not os.path.isfile(left) or not os.path.isfile(right):
+        return False
+    return _file_hash(left) == _file_hash(right)
+
+
+def replace_installed_exe(source: str, dest: str) -> bool:
+    """Copie ``source`` vers ``dest``.
+
+    Retourne False si ``dest`` est verrouillé (processus en cours / AV).
+    Sous Windows, tente un rename vers ``.old`` puis copie — un exe en cours
+    d'exécution peut souvent être renommé mais pas écrasé.
+    """
+    logger = get_logger()
+    if _binaries_identical(source, dest):
+        logger.info("install.skip_copy reason=identical_hash")
+        return True
+
+    try:
+        shutil.copy2(source, dest)
+        logger.info("install.copied mode=direct")
+        return True
+    except PermissionError:
+        logger.warning("install.copy_blocked mode=direct")
+    except OSError as exc:
+        logger.warning("install.copy_failed mode=direct error=%s", type(exc).__name__)
+        return False
+
+    # Windows : rename de l'exe verrouillé, puis écriture du nouveau fichier.
+    dest_old = f"{dest}.old"
+    try:
+        if os.path.isfile(dest_old):
+            try:
+                os.remove(dest_old)
+            except OSError:
+                pass
+        if os.path.isfile(dest):
+            os.replace(dest, dest_old)
+        shutil.copy2(source, dest)
+        logger.info("install.copied mode=rename_old")
+        try:
+            if os.path.isfile(dest_old):
+                os.remove(dest_old)
+        except OSError:
+            # L'ancien binaire peut rester verrouillé tant que le process tourne.
+            logger.info("install.old_kept reason=still_locked")
+        return True
+    except (PermissionError, OSError) as exc:
+        logger.warning("install.copy_failed mode=rename_old error=%s", type(exc).__name__)
+        # Tentative de rollback si le rename a réussi mais pas la copie.
+        if not os.path.isfile(dest) and os.path.isfile(dest_old):
+            try:
+                os.replace(dest_old, dest)
+            except OSError as rollback_exc:
+                logger.warning(
+                    "install.rollback_failed error=%s",
+                    type(rollback_exc).__name__,
+                )
+        return False
+
+
+def _warn_close_running_app() -> None:
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    messagebox.showwarning(
+        APP_NAME,
+        "Impossible de mettre à jour : Time Tracker est déjà en cours "
+        "d'exécution (ou le fichier est verrouillé).\n\n"
+        "Fermez-le complètement (icône près de l'horloge),\n"
+        "puis relancez ce fichier pour installer la mise à jour.",
+        parent=root,
+    )
+    root.destroy()
 
 
 def _ask_install_options(first_install: bool) -> tuple[bool, bool]:
@@ -176,8 +254,10 @@ def ensure_installed() -> None:
 
     if first_install:
         _migrate_data(os.path.dirname(running_exe), INSTALL_DIR)
-    needs_update = not first_install and _file_hash(running_exe) != _file_hash(INSTALL_EXE)
-    shutil.copy2(running_exe, INSTALL_EXE)
+    needs_update = not first_install and not _binaries_identical(running_exe, INSTALL_EXE)
+    if not replace_installed_exe(running_exe, INSTALL_EXE):
+        _warn_close_running_app()
+        sys.exit(0)
     _persist_startup_preference(launch_at_startup)
 
     if launch_at_startup:
