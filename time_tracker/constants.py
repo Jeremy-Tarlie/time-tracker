@@ -38,6 +38,7 @@ class ProjectsConfig(TypedDict):
     launch_at_startup: bool
     always_on_top: bool
     window_geometry: str | None
+    ui_compact: bool
     hotkeys: HotkeysConfig
 
 
@@ -75,7 +76,7 @@ SORT_OPTIONS: list[tuple[str, SortMode]] = [
 ]
 SORT_LABELS: dict[SortMode, str] = {mode: label for label, mode in SORT_OPTIONS}
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 APP_NAME = "Time Tracker"
 REGISTRY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REGISTRY_NAME = "TimeTracker"

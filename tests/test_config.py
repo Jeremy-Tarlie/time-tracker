@@ -71,6 +71,7 @@ class TestLoadConfig(unittest.TestCase):
             "launch_at_startup": True,
             "always_on_top": False,
             "window_geometry": "320x560+10+20",
+            "ui_compact": True,
             "hotkeys": {
                 "toggle": "ctrl+shift+space",
                 "stop": "ctrl+shift+enter",
@@ -87,6 +88,7 @@ class TestLoadConfig(unittest.TestCase):
         self.assertTrue(loaded["launch_at_startup"])
         self.assertFalse(loaded["always_on_top"])
         self.assertEqual(loaded["window_geometry"], "320x560+10+20")
+        self.assertTrue(loaded["ui_compact"])
         self.assertEqual(loaded["hotkeys"]["toggle"], "ctrl+shift+space")
         self.assertFalse(Path(str(path) + ".tmp").exists())
 
@@ -106,7 +108,24 @@ class TestLoadConfig(unittest.TestCase):
         cfg = load_config(str(path))
         self.assertTrue(cfg["always_on_top"])
         self.assertIsNone(cfg["window_geometry"])
+        self.assertFalse(cfg["ui_compact"])
         self.assertEqual(cfg["hotkeys"]["toggle"], "ctrl+shift+space")
+
+    def test_ui_compact_defaults_false_when_absent(self) -> None:
+        path = self._tmp() / "projects.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "projects": [{"name": "A", "created": "2026-01-01T00:00:00"}],
+                    "sort_mode": "alpha_asc",
+                    "excel_file": str(path.parent / "out.xlsx"),
+                    "launch_at_startup": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        cfg = load_config(str(path))
+        self.assertFalse(cfg["ui_compact"])
 
     def test_custom_hotkeys_roundtrip(self) -> None:
         path = self._tmp() / "projects.json"
@@ -132,6 +151,7 @@ class TestLoadConfig(unittest.TestCase):
         result = load_config_detailed(str(path))
         self.assertTrue(result.was_missing)
         self.assertTrue(result.config["always_on_top"])
+        self.assertFalse(result.config["ui_compact"])
 
     def test_bool_string_false_falls_back_to_default(self) -> None:
         path = self._tmp() / "projects.json"

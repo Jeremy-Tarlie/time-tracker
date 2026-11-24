@@ -110,6 +110,7 @@ class TimeTrackerApp:
         self.launch_at_startup = bool(config.get("launch_at_startup", False))
         self.always_on_top = bool(config.get("always_on_top", True))
         self.window_geometry: str | None = config.get("window_geometry")
+        self.ui_compact = bool(config.get("ui_compact", False))
         self.hotkeys: HotkeysConfig = parse_hotkeys(config.get("hotkeys"))
         self.sort_mode = tk.StringVar(value=SORT_LABELS[config["sort_mode"]])
         self._apply_topmost()
@@ -124,6 +125,10 @@ class TimeTrackerApp:
         self._tk_hotkey_bindings: list[str] = []
         self._hotkey_permission_warned = False
 
+        self._body: tk.Frame | None = None
+        self._top_row: tk.Frame | None = None
+        self._details_frame: tk.Frame | None = None
+        self._details_toggle: tk.Button | None = None
         self._manage_btn: tk.Button | None = None
         self._pause_btn: tk.Button | None = None
         self._retry_btn: tk.Button | None = None
@@ -244,7 +249,8 @@ class TimeTrackerApp:
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         width = max(320, min(width, sw))
-        height = max(400, min(height, sh))
+        # 280 = minsize mode compact ; le mode étendu applique minsize 560 à part.
+        height = max(280, min(height, sh))
         x = max(0, min(x, max(0, sw - width)))
         y = max(0, min(y, max(0, sh - height)))
         return f"{width}x{height}+{x}+{y}"
@@ -255,7 +261,12 @@ class TimeTrackerApp:
             if clamped:
                 self.root.geometry(clamped)
                 return
-        self.root.geometry("320x560")
+        if self.ui_compact:
+            self.root.update_idletasks()
+            default_h = max(280, int(self.root.winfo_reqheight()))
+        else:
+            default_h = 560
+        self.root.geometry(f"320x{default_h}")
         self._default_corner_geometry()
 
     def _capture_geometry(self) -> None:
@@ -458,13 +469,14 @@ class TimeTrackerApp:
 
         body = tk.Frame(self.root, bg=t.bg, padx=20, pady=18)
         body.pack(fill="both", expand=True)
+        self._body = body
 
-        top_row = tk.Frame(body, bg=t.bg)
-        top_row.pack(fill="x", pady=(0, 8))
-        section_label(top_row, "Projet").pack(side="left")
+        self._top_row = tk.Frame(body, bg=t.bg)
+        self._top_row.pack(fill="x", pady=(0, 8))
+        section_label(self._top_row, "Projet").pack(side="left")
 
         sort_combo = ttk.Combobox(
-            top_row,
+            self._top_row,
             textvariable=self.sort_mode,
             state="readonly",
             values=[label for label, _mode in SORT_OPTIONS],
@@ -476,7 +488,7 @@ class TimeTrackerApp:
         sort_combo.bind("<<ComboboxSelected>>", self._on_sort_changed)
 
         self._manage_btn = make_button(
-            top_row,
+            self._top_row,
             "Gérer",
             self._open_manage,
             variant="link",
@@ -587,11 +599,27 @@ class TimeTrackerApp:
         )
         self._retry_btn.configure(fg=t.danger)
         # Affiché uniquement s'il y a des sessions en file (voir _update_retry_button).
-        self._sessions_divider = tk.Frame(body, bg=t.border, height=1)
-        self._sessions_divider.pack(fill="x", pady=(18, 14))
 
-        section_label(body, "Sessions").pack(anchor="w", pady=(0, 6))
-        primary_actions = tk.Frame(body, bg=t.bg)
+        self._details_toggle = make_button(
+            body,
+            "▾ Détails",
+            self._toggle_ui_compact,
+            variant="link",
+            font_size=9,
+            bold=False,
+            padx=0,
+            pady=3,
+        )
+        self._details_toggle.pack(fill="x", anchor="w", pady=(14, 0))
+
+        self._details_frame = tk.Frame(body, bg=t.bg)
+        self._details_frame.pack(fill="x")
+
+        self._sessions_divider = tk.Frame(self._details_frame, bg=t.border, height=1)
+        self._sessions_divider.pack(fill="x", pady=(4, 14))
+
+        section_label(self._details_frame, "Sessions").pack(anchor="w", pady=(0, 6))
+        primary_actions = tk.Frame(self._details_frame, bg=t.bg)
         primary_actions.pack(fill="x", pady=(0, 10))
 
         def action_link(parent: tk.Frame, label: str, command: Callable[[], None]) -> None:
@@ -610,13 +638,14 @@ class TimeTrackerApp:
         action_link(primary_actions, "Période…", self._open_period)
         action_link(primary_actions, "Saisie manuelle…", self._open_manual)
 
-        section_label(body, "Excel").pack(anchor="w", pady=(4, 6))
-        secondary = tk.Frame(body, bg=t.bg)
+        section_label(self._details_frame, "Excel").pack(anchor="w", pady=(4, 6))
+        secondary = tk.Frame(self._details_frame, bg=t.bg)
         secondary.pack(fill="x")
         action_link(secondary, "Ouvrir Excel", self._open_excel)
         action_link(secondary, "Changer l'emplacement…", self._open_excel_settings)
         action_link(secondary, "À propos…", self._open_about)
 
+        self._set_ui_compact(self.ui_compact, persist=False, resize=False)
         self._update_retry_button()
         self._sync_start_enabled()
         self._set_status("En attente", kind="idle")
@@ -652,9 +681,63 @@ class TimeTrackerApp:
                 "launch_at_startup": self.launch_at_startup,
                 "always_on_top": self.always_on_top,
                 "window_geometry": self.window_geometry,
+                "ui_compact": self.ui_compact,
                 "hotkeys": self.hotkeys,
             }
         )
+
+    def _toggle_ui_compact(self) -> None:
+        self._set_ui_compact(not self.ui_compact, persist=True, resize=True)
+
+    def _set_ui_compact(
+        self,
+        compact: bool,
+        *,
+        persist: bool = True,
+        resize: bool = True,
+    ) -> None:
+        self.ui_compact = compact
+        if self._details_toggle is not None:
+            self._details_toggle.config(text="▸ Détails" if compact else "▾ Détails")
+
+        if compact:
+            if self._top_row is not None:
+                self._top_row.pack_forget()
+            if self._details_frame is not None:
+                self._details_frame.pack_forget()
+            self.root.minsize(320, 280)
+        else:
+            if self._top_row is not None and self.project_picker is not None:
+                if not bool(self._top_row.winfo_ismapped()):
+                    self._top_row.pack(fill="x", pady=(0, 8), before=self.project_picker)
+            if self._details_frame is not None and self._details_toggle is not None:
+                if not bool(self._details_frame.winfo_ismapped()):
+                    self._details_frame.pack(fill="x", after=self._details_toggle)
+            self.root.minsize(320, 560)
+
+        self._update_retry_button()
+        if resize:
+            # Hauteur requise réelle (évite de couper timer/boutons sous Windows).
+            floor = 280 if compact else 560
+            self.root.update_idletasks()
+            needed = max(floor, int(self.root.winfo_reqheight()))
+            self._fit_window_height(needed)
+        if persist:
+            self._save_config()
+
+    def _fit_window_height(self, target_height: int) -> None:
+        """Ajuste la hauteur en conservant largeur et position ; sync window_geometry."""
+        self.root.update_idletasks()
+        width = max(320, self.root.winfo_width())
+        current_h = self.root.winfo_height()
+        if abs(current_h - target_height) < 8:
+            return
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        geom = f"{width}x{target_height}+{x}+{y}"
+        self.root.geometry(geom)
+        self.window_geometry = geom
+        self._schedule_geometry_save()
 
     def _on_sort_changed(self, _event: object = None) -> None:
         self._refresh_project_list(persist_sort=True)
@@ -943,11 +1026,11 @@ class TimeTrackerApp:
                 text=f"↺  Réessayer ({len(pending)})",
             )
             if not bool(self._retry_btn.winfo_ismapped()):
-                if self._sessions_divider is not None:
+                if self._details_toggle is not None:
                     self._retry_btn.pack(
                         fill="x",
                         pady=(14, 0),
-                        before=self._sessions_divider,
+                        before=self._details_toggle,
                     )
                 else:
                     self._retry_btn.pack(fill="x", pady=(14, 0))
@@ -1315,6 +1398,7 @@ class TimeTrackerApp:
             launch_at_startup=self.launch_at_startup,
             always_on_top=self.always_on_top,
             window_geometry=self.window_geometry,
+            ui_compact=self.ui_compact,
             hotkeys=self.hotkeys,
         )
 

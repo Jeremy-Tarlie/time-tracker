@@ -346,6 +346,7 @@ class ManageProjectsDialog(tk.Toplevel):
         launch_at_startup: bool,
         always_on_top: bool,
         window_geometry: str | None,
+        ui_compact: bool,
         hotkeys: HotkeysConfig,
     ) -> None:
         super().__init__(parent)
@@ -354,6 +355,7 @@ class ManageProjectsDialog(tk.Toplevel):
         self.launch_at_startup = launch_at_startup
         self.always_on_top = always_on_top
         self.window_geometry = window_geometry
+        self.ui_compact = ui_compact
         self.hotkeys = hotkeys
         self.sort_mode = tk.StringVar(value=SORT_LABELS[sort_mode])
         names = project_names(sort_projects(self.projects, sort_mode))
@@ -570,6 +572,7 @@ class ManageProjectsDialog(tk.Toplevel):
                 "launch_at_startup": self.launch_at_startup,
                 "always_on_top": self.always_on_top,
                 "window_geometry": self.window_geometry,
+                "ui_compact": self.ui_compact,
                 "hotkeys": self.hotkeys,
             }
         )
@@ -611,6 +614,7 @@ class SettingsDialog(tk.Toplevel):
         self.grab_set()
         t = THEME
         dialog_header(self, "Réglages")
+        # pady Frame = int (stubs mypy) ; marge basse via btn_row pady=(14, 4).
         body = tk.Frame(self, bg=t.bg, padx=18, pady=16)
         body.pack(fill="both", expand=True)
 
@@ -679,7 +683,7 @@ class SettingsDialog(tk.Toplevel):
 
         for action in HOTKEY_ACTIONS:
             row = tk.Frame(body, bg=t.bg)
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=4)
             tk.Label(
                 row,
                 text=HOTKEY_LABELS[action],
@@ -715,6 +719,8 @@ class SettingsDialog(tk.Toplevel):
                 variant="subtle",
                 font_size=8,
                 bold=False,
+                padx=8,
+                pady=3,
             ).pack(side="left")
 
         make_button(
@@ -729,7 +735,7 @@ class SettingsDialog(tk.Toplevel):
         self.bind("<KeyPress>", self._on_capture_key)
 
         btn_row = tk.Frame(body, bg=t.bg)
-        btn_row.pack(fill="x", pady=(18, 0))
+        btn_row.pack(fill="x", pady=(14, 4))
         make_button(
             btn_row,
             "À propos",
@@ -749,8 +755,8 @@ class SettingsDialog(tk.Toplevel):
         make_button(btn_row, "Enregistrer", self._save, variant="primary", font_size=9).pack(
             side="right",
         )
-        self.minsize(420, 560)
-        self.geometry("420x600")
+        self.minsize(420, 640)
+        self.geometry("420x680")
 
     def _refresh_hotkey_labels(self) -> None:
         for action in HOTKEY_ACTIONS:

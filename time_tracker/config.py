@@ -65,6 +65,7 @@ def _fallback_config() -> ProjectsConfig:
         "launch_at_startup": False,
         "always_on_top": True,
         "window_geometry": None,
+        "ui_compact": False,
         "hotkeys": default_hotkeys(),
     }
 
@@ -154,6 +155,7 @@ def load_config_detailed(path: str | None = None) -> ConfigLoadResult:
                 "launch_at_startup": False,
                 "always_on_top": True,
                 "window_geometry": None,
+                "ui_compact": False,
                 "hotkeys": default_hotkeys(),
             },
             was_legacy=True,
@@ -175,6 +177,7 @@ def load_config_detailed(path: str | None = None) -> ConfigLoadResult:
     launch_raw = raw.get("launch_at_startup", False)
     # Défaut True : comportement historique « toujours au premier plan ».
     topmost_raw = raw.get("always_on_top", True)
+    compact_raw = raw.get("ui_compact", False)
     geometry_raw = raw.get("window_geometry")
     window_geometry = (
         str(geometry_raw).strip()
@@ -189,6 +192,7 @@ def load_config_detailed(path: str | None = None) -> ConfigLoadResult:
             "launch_at_startup": _parse_bool(launch_raw, default=False),
             "always_on_top": _parse_bool(topmost_raw, default=True),
             "window_geometry": window_geometry,
+            "ui_compact": _parse_bool(compact_raw, default=False),
             "hotkeys": parse_hotkeys(raw.get("hotkeys")),
         },
     )
@@ -208,6 +212,7 @@ def save_config(config: ProjectsConfig, path: str | None = None) -> None:
         "launch_at_startup": bool(config.get("launch_at_startup", False)),
         "always_on_top": bool(config.get("always_on_top", True)),
         "window_geometry": str(geometry).strip() if geometry else None,
+        "ui_compact": bool(config.get("ui_compact", False)),
         "hotkeys": parse_hotkeys(config.get("hotkeys")),
     }
     write_json_atomic(config_path, payload)
