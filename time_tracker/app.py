@@ -51,6 +51,7 @@ from time_tracker.hotkeys import (
     hotkey_to_tk,
     parse_hotkeys,
 )
+from time_tracker.instance import release_instance_lock
 from time_tracker.logging_setup import get_logger
 from time_tracker.paths import is_frozen
 from time_tracker.session_store import (
@@ -1309,18 +1310,8 @@ class TimeTrackerApp:
             setattr(self, job_attr, None)
 
     def _on_close_request(self) -> None:
-        if self._quitting:
-            return
-        if self.tracking:
-            if not messagebox.askyesno(
-                "Session en cours",
-                "Une session est en cours. Arrêter et enregistrer avant de quitter ?",
-                parent=self.root,
-            ):
-                return
-            self._stop()
-            return
-        self.root.withdraw()
+        # Croix = quitter (plus de withdraw silencieux qui laisse des process vivants).
+        self._quit_app()
 
     def _quit_app(self) -> None:
         if self._quitting:
@@ -1347,6 +1338,7 @@ class TimeTrackerApp:
         if self._tray is not None:
             self._tray.stop()
         clear_active_session()
+        release_instance_lock()
         self.root.destroy()
 
     def _offer_recreate_excel(self) -> None:
