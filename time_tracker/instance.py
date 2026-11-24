@@ -57,17 +57,37 @@ def _safe_close(handle: TextIO) -> None:
         pass
 
 
-def _acquire_instance_lock_once(path: str) -> TextIO:
+def _open_lock_file(path: str) -> TextIO:
+    """Ouvre le fichier lock ; 1 retry si open échoue (lock orphelin ACL/AV).
+
+    Ne retente PAS après un échec de flock/locking : sous Linux, unlink d'un
+    fichier flocké réussit et casserait l'exclusion mutuelle.
+    """
     parent = os.path.dirname(path)
     if parent:
         try:
             os.makedirs(parent, exist_ok=True)
         except OSError as exc:
             raise InstanceLockError("Impossible d'accéder au verrou d'instance.") from exc
+
     try:
-        handle = open(path, "a+", encoding="utf-8")
-    except OSError as exc:
-        raise InstanceLockError("Impossible d'accéder au verrou d'instance.") from exc
+        return open(path, "a+", encoding="utf-8")
+    except OSError as first_exc:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as exc:
+            raise InstanceLockError("Impossible d'accéder au verrou d'instance.") from exc
+        try:
+            return open(path, "a+", encoding="utf-8")
+        except OSError:
+            raise InstanceLockError("Impossible d'accéder au verrou d'instance.") from first_exc
+
+
+def acquire_instance_lock(path: str = INSTANCE_LOCK_FILE) -> TextIO:
+    """Acquiert le verrou fichier. Lève ``InstanceLockError`` si indisponible."""
+    global _lock_handle
+    handle = _open_lock_file(path)
     try:
         handle.seek(0)
         handle.truncate()
@@ -81,25 +101,6 @@ def _acquire_instance_lock_once(path: str) -> TextIO:
         # close() peut aussi lever PermissionError sur Windows — ne pas masquer.
         _safe_close(handle)
         raise InstanceLockError("Time Tracker est déjà en cours d'exécution.") from exc
-    return handle
-
-
-def acquire_instance_lock(path: str = INSTANCE_LOCK_FILE) -> TextIO:
-    """Acquiert le verrou fichier. Lève ``InstanceLockError`` si indisponible.
-
-    En cas de PermissionError sur un lock orphelin (ACL / AV), tente une
-    suppression puis un second essai avant d'abandonner.
-    """
-    global _lock_handle
-    try:
-        handle = _acquire_instance_lock_once(path)
-    except InstanceLockError:
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-        except OSError as exc:
-            raise InstanceLockError("Time Tracker est déjà en cours d'exécution.") from exc
-        handle = _acquire_instance_lock_once(path)
     _lock_handle = handle
     atexit.register(release_instance_lock)
     return handle
