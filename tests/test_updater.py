@@ -25,6 +25,7 @@ from time_tracker.updater import (
     fetch_latest_release,
     is_newer,
     parse_version,
+    try_startup_auto_update,
 )
 
 
@@ -354,7 +355,13 @@ class TestBuildHelperScripts(unittest.TestCase):
         self.assertIn("4242", script)
         self.assertIn("move /Y", script)
         self.assertIn('start ""', script)
-        self.assertIn(".old", script)
+        self.assertIn(".old.4242", script)
+        self.assertIn("update.failed", script)
+        self.assertIn(":relaunch", script)
+        # Relance même après échec : start après le label relaunch.
+        relaunch_idx = script.index(":relaunch")
+        self.assertGreater(script.index('start ""', relaunch_idx), relaunch_idx)
+        self.assertNotIn("exit /b 1", script)
 
     def test_posix_helper_contains_kill_mv_and_chmod(self) -> None:
         script = build_posix_helper_script(
@@ -366,6 +373,65 @@ class TestBuildHelperScripts(unittest.TestCase):
         self.assertIn("kill -0 1337", script)
         self.assertIn("mv ", script)
         self.assertIn("chmod +x", script)
+        self.assertIn(".old.1337", script)
+        self.assertIn("update.failed", script)
+        self.assertIn(">/dev/null 2>&1 &", script)
+        self.assertNotIn("exit 1", script)
+
+
+class TestUpdateFailureMarker(unittest.TestCase):
+    def test_has_and_clear_marker(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from time_tracker.updater import (
+            clear_update_failure_marker,
+            has_update_failure_marker,
+            update_failure_marker_path,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = str(Path(tmp) / "TimeTracker.exe")
+            Path(exe).write_bytes(b"x")
+            marker = update_failure_marker_path(exe)
+            self.assertFalse(has_update_failure_marker(exe))
+            Path(marker).write_text("failed", encoding="utf-8")
+            self.assertTrue(has_update_failure_marker(exe))
+            clear_update_failure_marker(exe)
+            self.assertFalse(has_update_failure_marker(exe))
+
+
+class TestTryStartupAutoUpdate(unittest.TestCase):
+    def test_skips_when_failure_marker_present(self) -> None:
+        with (
+            patch("time_tracker.updater.is_frozen", return_value=True),
+            patch("time_tracker.updater.has_update_failure_marker", return_value=True),
+            patch("time_tracker.updater.check_for_update") as check,
+            patch("time_tracker.updater.prepare_and_relaunch") as prepare,
+        ):
+            try_startup_auto_update(current_version="1.7.5")
+        check.assert_not_called()
+        prepare.assert_not_called()
+
+    def test_retries_existing_new_without_download(self) -> None:
+        with (
+            patch("time_tracker.updater.is_frozen", return_value=True),
+            patch("time_tracker.updater.has_update_failure_marker", return_value=False),
+            patch(
+                "time_tracker.updater.new_binary_path",
+                return_value="/tmp/TimeTracker.exe.new",
+            ),
+            patch("time_tracker.updater.os.path.isfile", return_value=True),
+            patch(
+                "time_tracker.updater.prepare_and_relaunch",
+                side_effect=SystemExit(0),
+            ) as prepare,
+            patch("time_tracker.updater.check_for_update") as check,
+        ):
+            with self.assertRaises(SystemExit):
+                try_startup_auto_update(current_version="1.7.5")
+        prepare.assert_called_once_with("/tmp/TimeTracker.exe.new")
+        check.assert_not_called()
 
 
 if __name__ == "__main__":

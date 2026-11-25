@@ -368,6 +368,30 @@ def new_binary_path(exe_path: str | None = None) -> str:
     return f"{path}.new"
 
 
+def update_failure_marker_path(exe_path: str | None = None) -> str:
+    path = exe_path if exe_path is not None else get_running_exe()
+    return f"{path}.update.failed"
+
+
+def update_helper_log_path(exe_path: str | None = None) -> str:
+    path = exe_path if exe_path is not None else get_running_exe()
+    return f"{path}.update-helper.log"
+
+
+def has_update_failure_marker(exe_path: str | None = None) -> bool:
+    return os.path.isfile(update_failure_marker_path(exe_path))
+
+
+def clear_update_failure_marker(exe_path: str | None = None) -> None:
+    marker = update_failure_marker_path(exe_path)
+    if not os.path.isfile(marker):
+        return
+    try:
+        os.remove(marker)
+    except OSError as exc:
+        get_logger().warning("update.clear_failure_marker_failed reason=%s", type(exc).__name__)
+
+
 def portable_relaunch_args() -> list[str]:
     return ["--portable"] if "--portable" in sys.argv else []
 
@@ -386,32 +410,59 @@ def build_windows_helper_script(
     new_path: str,
     relaunch_args: list[str],
 ) -> str:
+    """Remplace l'exe puis relance toujours (même en cas d'échec)."""
     exe_q = _batch_quote(exe_path)
     new_q = _batch_quote(new_path)
-    old_q = _batch_quote(f"{exe_path}.old")
+    old_q = _batch_quote(f"{exe_path}.old.{pid}")
+    log_q = _batch_quote(update_helper_log_path(exe_path))
+    failed_q = _batch_quote(update_failure_marker_path(exe_path))
     safe_args = [a for a in relaunch_args if a == "--portable"]
     args = " ".join(f'"{a}"' for a in safe_args)
     launch = f"{exe_q} {args}".rstrip()
     return (
         "@echo off\r\n"
-        "setlocal\r\n"
+        "setlocal EnableExtensions\r\n"
+        f"echo wait pid={pid}> {log_q}\r\n"
         f":wait\r\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\r\n'
         "if not errorlevel 1 (\r\n"
         "  timeout /t 1 /nobreak >NUL\r\n"
         "  goto wait\r\n"
         ")\r\n"
-        f"if exist {old_q} del /F /Q {old_q}\r\n"
-        f"move /Y {exe_q} {old_q}\r\n"
-        "if errorlevel 1 exit /b 1\r\n"
-        f"move /Y {new_q} {exe_q}\r\n"
-        "if errorlevel 1 (\r\n"
-        f"  move /Y {old_q} {exe_q}\r\n"
-        "  exit /b 1\r\n"
+        f"echo replacing>> {log_q}\r\n"
+        "set RETRY=0\r\n"
+        ":retry_move_old\r\n"
+        "set /a RETRY+=1\r\n"
+        f"move /Y {exe_q} {old_q} >NUL 2>&1\r\n"
+        "if not errorlevel 1 goto moved_old\r\n"
+        "if %RETRY% GEQ 5 (\r\n"
+        f"  echo fail_move_old>> {log_q}\r\n"
+        f"  echo failed> {failed_q}\r\n"
+        "  goto relaunch\r\n"
         ")\r\n"
+        "timeout /t 1 /nobreak >NUL\r\n"
+        "goto retry_move_old\r\n"
+        ":moved_old\r\n"
+        "set RETRY=0\r\n"
+        ":retry_move_new\r\n"
+        "set /a RETRY+=1\r\n"
+        f"move /Y {new_q} {exe_q} >NUL 2>&1\r\n"
+        "if not errorlevel 1 goto success\r\n"
+        "if %RETRY% GEQ 5 (\r\n"
+        f"  echo fail_move_new>> {log_q}\r\n"
+        f"  move /Y {old_q} {exe_q} >NUL 2>&1\r\n"
+        f"  echo failed> {failed_q}\r\n"
+        "  goto relaunch\r\n"
+        ")\r\n"
+        "timeout /t 1 /nobreak >NUL\r\n"
+        "goto retry_move_new\r\n"
+        ":success\r\n"
+        f"echo success>> {log_q}\r\n"
+        f"if exist {failed_q} del /F /Q {failed_q} >NUL 2>&1\r\n"
+        f"if exist {old_q} del /F /Q {old_q} >NUL 2>&1\r\n"
+        ":relaunch\r\n"
         f'start "" {launch}\r\n'
-        f"if exist {old_q} del /F /Q {old_q}\r\n"
-        'del /F /Q "%~f0"\r\n'
+        'del /F /Q "%~f0" >NUL 2>&1\r\n'
     )
 
 
@@ -422,25 +473,54 @@ def build_posix_helper_script(
     new_path: str,
     relaunch_args: list[str],
 ) -> str:
+    """Remplace le binaire puis relance toujours (même en cas d'échec)."""
     exe_q = shlex.quote(exe_path)
     new_q = shlex.quote(new_path)
-    old_q = shlex.quote(f"{exe_path}.old")
+    old_q = shlex.quote(f"{exe_path}.old.{pid}")
+    log_q = shlex.quote(update_helper_log_path(exe_path))
+    failed_q = shlex.quote(update_failure_marker_path(exe_path))
     safe_args = [a for a in relaunch_args if a == "--portable"]
     args_joined = " ".join(shlex.quote(a) for a in safe_args)
     launch = f"{exe_q} {args_joined}".rstrip()
     return (
         "#!/bin/sh\n"
-        "set -eu\n"
+        f'echo "wait pid={pid}" > {log_q}\n'
         f"while kill -0 {pid} 2>/dev/null; do sleep 1; done\n"
-        f"rm -f {old_q}\n"
-        f"mv {exe_q} {old_q}\n"
-        f"if ! mv {new_q} {exe_q}; then\n"
-        f"  mv {old_q} {exe_q}\n"
-        "  exit 1\n"
+        f"echo replacing >> {log_q}\n"
+        "ok=0\n"
+        "i=0\n"
+        'while [ "$i" -lt 5 ]; do\n'
+        "  i=$((i + 1))\n"
+        f"  if mv {exe_q} {old_q} 2>/dev/null; then\n"
+        "    break\n"
+        "  fi\n"
+        "  sleep 1\n"
+        "done\n"
+        f"if [ ! -e {old_q} ]; then\n"
+        f"  echo fail_move_old >> {log_q}\n"
+        f"  echo failed > {failed_q}\n"
+        "else\n"
+        "  i=0\n"
+        '  while [ "$i" -lt 5 ]; do\n'
+        "    i=$((i + 1))\n"
+        f"    if mv {new_q} {exe_q} 2>/dev/null; then\n"
+        "      ok=1\n"
+        "      break\n"
+        "    fi\n"
+        "    sleep 1\n"
+        "  done\n"
+        '  if [ "$ok" -ne 1 ]; then\n'
+        f"    echo fail_move_new >> {log_q}\n"
+        f"    mv {old_q} {exe_q} 2>/dev/null || true\n"
+        f"    echo failed > {failed_q}\n"
+        "  else\n"
+        f"    echo success >> {log_q}\n"
+        f"    rm -f {failed_q}\n"
+        f"    rm -f {old_q}\n"
+        f"    chmod +x {exe_q} 2>/dev/null || true\n"
+        "  fi\n"
         "fi\n"
-        f"chmod +x {exe_q}\n"
         f"{launch} >/dev/null 2>&1 &\n"
-        f"rm -f {old_q}\n"
         'rm -f -- "$0"\n'
     )
 
@@ -475,6 +555,7 @@ def prepare_and_relaunch(new_path: str, *, exe_path: str | None = None) -> NoRet
         logger.warning("update.apply_failed reason=missing_new_binary")
         raise FileNotFoundError(new_path)
 
+    clear_update_failure_marker(target)
     relaunch_args = portable_relaunch_args()
     pid = os.getpid()
     if sys.platform == "win32":
@@ -525,11 +606,25 @@ def apply_update(availability: UpdateAvailability) -> NoReturn:
 
 
 def try_startup_auto_update(*, current_version: str = APP_VERSION) -> None:
-    """Au démarrage frozen : applique silencieusement si une version plus récente existe."""
+    """Au démarrage frozen : applique silencieusement si une version plus récente existe.
+
+    Si un échec de remplacement précédent a laissé un marqueur, n'applique pas
+    automatiquement (évite la boucle téléchargement → quit → pas d'UI) : l'app
+    s'ouvre et le bouton de mise à jour reste disponible.
+    """
     if not is_frozen():
         return
     logger = get_logger()
     try:
+        if has_update_failure_marker():
+            logger.warning("update.startup_skipped reason=recent_failure")
+            return
+
+        existing_new = new_binary_path()
+        if os.path.isfile(existing_new):
+            logger.info("update.startup_retry_existing_new")
+            prepare_and_relaunch(existing_new)
+
         result = check_for_update(current_version=current_version)
         if result.status != "available" or result.availability is None:
             return
