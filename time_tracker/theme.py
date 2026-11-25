@@ -69,6 +69,32 @@ def font_mono(size: int, *, bold: bool = False) -> tuple[str, int] | tuple[str, 
 
 def apply_window(root: tk.Tk | tk.Toplevel | tk.Frame, theme: Theme = THEME) -> None:
     root.configure(bg=theme.bg)
+    # Les Toplevel doivent passer au-dessus d'une fenêtre principale -topmost.
+    if isinstance(root, tk.Toplevel):
+        try:
+            root.attributes("-topmost", True)
+            root.lift()
+        except tk.TclError:
+            pass
+
+
+def apply_modal_dialog(
+    dialog: tk.Toplevel,
+    parent: tk.Misc | None = None,
+    theme: Theme = THEME,
+) -> None:
+    """Configure un dialogue modal au-dessus du parent (même si -topmost)."""
+    apply_window(dialog, theme)
+    if parent is not None:
+        try:
+            dialog.transient(parent.winfo_toplevel())
+        except tk.TclError:
+            pass
+    try:
+        dialog.lift()
+        dialog.focus_force()
+    except tk.TclError:
+        pass
 
 
 def apply_ttk_theme(style: ttk.Style | None = None, theme: Theme = THEME) -> ttk.Style:

@@ -47,6 +47,7 @@ from time_tracker.hotkeys import (
 from time_tracker.paths import APP_DIR, default_excel_path, normalize_excel_path
 from time_tracker.theme import (
     THEME,
+    apply_modal_dialog,
     apply_ttk_theme,
     apply_window,
     dialog_header,
@@ -391,14 +392,15 @@ class ManageProjectsDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(320, 320)
         self.grab_set()
-        apply_window(self)
+        apply_modal_dialog(self, parent)
         apply_ttk_theme()
         self._build()
         self._refresh_picker()
         self.update_idletasks()
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
-        self.geometry(f"340x300+{px - 260}+{py}")
+        # Décalage vers le bas/droite du parent (pas derrière grâce au -topmost).
+        self.geometry(f"340x300+{px + 24}+{py + 48}")
 
     def _build(self) -> None:
         t = THEME

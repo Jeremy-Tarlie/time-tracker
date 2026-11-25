@@ -97,6 +97,7 @@ logger = get_logger()
 _PENDING_RETRY_MS = 15_000
 _GEOMETRY_DEBOUNCE_MS = 400
 _MIN_WIDTH = 300
+_MIN_HEIGHT = 220
 _TIMER_FONT_SIZE = 32
 
 
@@ -104,7 +105,7 @@ class TimeTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Time Tracker")
-        self.root.minsize(_MIN_WIDTH, 560)
+        self.root.minsize(_MIN_WIDTH, _MIN_HEIGHT)
         self.root.resizable(True, True)
         self._theme: Theme = THEME
         apply_window(self.root, self._theme)
@@ -139,6 +140,9 @@ class TimeTrackerApp:
         self._retry_btn: tk.Button | None = None
         self._manual_link: tk.Button | None = None
         self._start_at_btn: tk.Button | None = None
+        self._scroll_canvas: tk.Canvas | None = None
+        self._scroll_bar: ttk.Scrollbar | None = None
+        self._scroll_window: int | None = None
         self._sessions_divider: tk.Frame | None = None
         self._status_dot: tk.Label | None = None
         self._status_wrap: tk.Frame | None = None
@@ -256,8 +260,7 @@ class TimeTrackerApp:
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         width = max(_MIN_WIDTH, min(width, sw))
-        # 280 = minsize mode compact ; le mode étendu applique minsize 560 à part.
-        height = max(280, min(height, sh))
+        height = max(_MIN_HEIGHT, min(height, sh))
         x = max(0, min(x, max(0, sw - width)))
         y = max(0, min(y, max(0, sh - height)))
         return f"{width}x{height}+{x}+{y}"
@@ -270,7 +273,7 @@ class TimeTrackerApp:
                 return
         if self.ui_compact:
             self.root.update_idletasks()
-            default_h = max(280, int(self.root.winfo_reqheight()))
+            default_h = max(_MIN_HEIGHT, int(self.root.winfo_reqheight()))
         else:
             default_h = 560
         self.root.geometry(f"{_MIN_WIDTH}x{default_h}")
@@ -474,8 +477,7 @@ class TimeTrackerApp:
         ).pack(fill="x", pady=(2, 0))
         hairline(self.root, t)
 
-        body = tk.Frame(self.root, bg=t.bg, padx=20, pady=18)
-        body.pack(fill="both", expand=True)
+        body = self._build_scrollable_body(t)
         self._body = body
 
         self._top_row = tk.Frame(body, bg=t.bg)
@@ -681,6 +683,64 @@ class TimeTrackerApp:
         self._update_retry_button()
         self._sync_start_enabled()
         self._set_status("En attente", kind="idle")
+        self._refresh_scroll_region()
+
+    def _build_scrollable_body(self, t: Theme) -> tk.Frame:
+        """Corps principal dans un Canvas scrollable (fenêtre réduite)."""
+        shell = tk.Frame(self.root, bg=t.bg)
+        shell.pack(fill="both", expand=True)
+        self._scroll_canvas = tk.Canvas(
+            shell,
+            bg=t.bg,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._scroll_bar = ttk.Scrollbar(
+            shell,
+            orient="vertical",
+            command=self._scroll_canvas.yview,
+        )
+        self._scroll_canvas.configure(yscrollcommand=self._scroll_bar.set)
+        self._scroll_bar.pack(side="right", fill="y")
+        self._scroll_canvas.pack(side="left", fill="both", expand=True)
+
+        body = tk.Frame(self._scroll_canvas, bg=t.bg, padx=20, pady=18)
+        self._scroll_window = self._scroll_canvas.create_window(
+            (0, 0),
+            window=body,
+            anchor="nw",
+        )
+        body.bind("<Configure>", self._on_scroll_body_configure)
+        self._scroll_canvas.bind("<Configure>", self._on_scroll_canvas_configure)
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
+        return body
+
+    def _on_scroll_body_configure(self, _event: object = None) -> None:
+        self._refresh_scroll_region()
+
+    def _on_scroll_canvas_configure(self, event: tk.Event[tk.Misc]) -> None:
+        if self._scroll_canvas is None or self._scroll_window is None:
+            return
+        self._scroll_canvas.itemconfigure(self._scroll_window, width=int(event.width))
+
+    def _refresh_scroll_region(self) -> None:
+        if self._scroll_canvas is None:
+            return
+        self._scroll_canvas.update_idletasks()
+        bbox = self._scroll_canvas.bbox("all")
+        if bbox is not None:
+            self._scroll_canvas.configure(scrollregion=bbox)
+
+    def _on_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
+        if self._scroll_canvas is None:
+            return None
+        try:
+            if event.widget.winfo_toplevel() is not self.root:
+                return None
+        except tk.TclError:
+            return None
+        self._scroll_canvas.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
 
     def _current_sort_mode(self) -> SortMode:
         label = self.sort_mode.get()
@@ -737,7 +797,6 @@ class TimeTrackerApp:
                 self._top_row.pack_forget()
             if self._details_frame is not None:
                 self._details_frame.pack_forget()
-            self.root.minsize(_MIN_WIDTH, 280)
         else:
             if self._top_row is not None and self.project_picker is not None:
                 if not bool(self._top_row.winfo_ismapped()):
@@ -745,11 +804,12 @@ class TimeTrackerApp:
             if self._details_frame is not None and self._details_toggle is not None:
                 if not bool(self._details_frame.winfo_ismapped()):
                     self._details_frame.pack(fill="x", after=self._details_toggle)
-            self.root.minsize(_MIN_WIDTH, 560)
+        self.root.minsize(_MIN_WIDTH, _MIN_HEIGHT)
 
         self._update_retry_button()
+        self._refresh_scroll_region()
         if resize:
-            # Hauteur requise réelle (évite de couper timer/boutons sous Windows).
+            # Hauteur confortable au bascule, puis l'utilisateur peut réduire (scroll).
             floor = 280 if compact else 560
             self.root.update_idletasks()
             needed = max(floor, int(self.root.winfo_reqheight()))
