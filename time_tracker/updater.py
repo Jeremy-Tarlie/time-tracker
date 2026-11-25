@@ -429,11 +429,14 @@ def build_windows_helper_script(
         f'"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) '
         '{ Start-Sleep -Seconds 1 }"'
     )
+    # Délais : laisser PyInstaller nettoyer _MEI + Defender finir le scan du nouvel exe.
+    # Sans ça, le relancement immédiat échoue souvent avec « Failed to load Python DLL ».
     return (
         "@echo off\r\n"
         "setlocal EnableExtensions\r\n"
         f"echo wait pid={pid}> {log_q}\r\n"
         f"{wait_ps}\r\n"
+        "ping -n 4 127.0.0.1 >NUL\r\n"
         f"echo replacing>> {log_q}\r\n"
         "set RETRY=0\r\n"
         ":retry_move_old\r\n"
@@ -466,6 +469,8 @@ def build_windows_helper_script(
         f"if exist {failed_q} del /F /Q {failed_q} >NUL 2>&1\r\n"
         f"if exist {old_q} del /F /Q {old_q} >NUL 2>&1\r\n"
         ":relaunch\r\n"
+        "ping -n 4 127.0.0.1 >NUL\r\n"
+        f"echo relaunch>> {log_q}\r\n"
         f'start "" {launch}\r\n'
         'del /F /Q "%~f0" >NUL 2>&1\r\n'
     )
@@ -491,6 +496,7 @@ def build_posix_helper_script(
         "#!/bin/sh\n"
         f'echo "wait pid={pid}" > {log_q}\n'
         f"while kill -0 {pid} 2>/dev/null; do sleep 1; done\n"
+        "sleep 3\n"
         f"echo replacing >> {log_q}\n"
         "ok=0\n"
         "i=0\n"
@@ -525,6 +531,8 @@ def build_posix_helper_script(
         f"    chmod +x {exe_q} 2>/dev/null || true\n"
         "  fi\n"
         "fi\n"
+        "sleep 3\n"
+        f"echo relaunch >> {log_q}\n"
         f"{launch} >/dev/null 2>&1 &\n"
         'rm -f -- "$0"\n'
     )

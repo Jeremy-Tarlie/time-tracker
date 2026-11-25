@@ -360,6 +360,8 @@ class TestBuildHelperScripts(unittest.TestCase):
         self.assertIn(":relaunch", script)
         self.assertIn("Get-Process -Id 4242", script)
         self.assertIn("ping -n 2", script)
+        self.assertIn("ping -n 4", script)
+        self.assertIn("relaunch", script)
         self.assertNotIn("timeout /t", script)
         self.assertNotIn("| find ", script)
         # Relance même après échec : start après le label relaunch.
