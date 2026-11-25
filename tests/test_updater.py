@@ -358,6 +358,10 @@ class TestBuildHelperScripts(unittest.TestCase):
         self.assertIn(".old.4242", script)
         self.assertIn("update.failed", script)
         self.assertIn(":relaunch", script)
+        self.assertIn("Get-Process -Id 4242", script)
+        self.assertIn("ping -n 2", script)
+        self.assertNotIn("timeout /t", script)
+        self.assertNotIn("| find ", script)
         # Relance même après échec : start après le label relaunch.
         relaunch_idx = script.index(":relaunch")
         self.assertGreater(script.index('start ""', relaunch_idx), relaunch_idx)
@@ -413,25 +417,20 @@ class TestTryStartupAutoUpdate(unittest.TestCase):
         check.assert_not_called()
         prepare.assert_not_called()
 
-    def test_retries_existing_new_without_download(self) -> None:
+    def test_up_to_date_removes_stale_new(self) -> None:
         with (
             patch("time_tracker.updater.is_frozen", return_value=True),
             patch("time_tracker.updater.has_update_failure_marker", return_value=False),
             patch(
-                "time_tracker.updater.new_binary_path",
-                return_value="/tmp/TimeTracker.exe.new",
+                "time_tracker.updater.check_for_update",
+                return_value=UpdateCheckResult(status="up_to_date"),
             ),
-            patch("time_tracker.updater.os.path.isfile", return_value=True),
-            patch(
-                "time_tracker.updater.prepare_and_relaunch",
-                side_effect=SystemExit(0),
-            ) as prepare,
-            patch("time_tracker.updater.check_for_update") as check,
+            patch("time_tracker.updater._remove_stale_new_binary") as cleanup,
+            patch("time_tracker.updater.apply_update") as apply,
         ):
-            with self.assertRaises(SystemExit):
-                try_startup_auto_update(current_version="1.7.5")
-        prepare.assert_called_once_with("/tmp/TimeTracker.exe.new")
-        check.assert_not_called()
+            try_startup_auto_update(current_version="1.7.7")
+        cleanup.assert_called_once_with()
+        apply.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -410,7 +410,11 @@ def build_windows_helper_script(
     new_path: str,
     relaunch_args: list[str],
 ) -> str:
-    """Remplace l'exe puis relance toujours (même en cas d'échec)."""
+    """Remplace l'exe puis relance toujours (même en cas d'échec).
+
+    N'utilise pas ``timeout`` ni ``find`` : sous CREATE_NO_WINDOW, ``timeout``
+    échoue et ``tasklist|find`` peut ouvrir une fenêtre console visible.
+    """
     exe_q = _batch_quote(exe_path)
     new_q = _batch_quote(new_path)
     old_q = _batch_quote(f"{exe_path}.old.{pid}")
@@ -419,16 +423,17 @@ def build_windows_helper_script(
     safe_args = [a for a in relaunch_args if a == "--portable"]
     args = " ".join(f'"{a}"' for a in safe_args)
     launch = f"{exe_q} {args}".rstrip()
+    # Attente PID sans console : PowerShell Hidden (pas de timeout/find).
+    wait_ps = (
+        "powershell -NoProfile -WindowStyle Hidden -Command "
+        f'"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) '
+        '{ Start-Sleep -Seconds 1 }"'
+    )
     return (
         "@echo off\r\n"
         "setlocal EnableExtensions\r\n"
         f"echo wait pid={pid}> {log_q}\r\n"
-        f":wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\r\n'
-        "if not errorlevel 1 (\r\n"
-        "  timeout /t 1 /nobreak >NUL\r\n"
-        "  goto wait\r\n"
-        ")\r\n"
+        f"{wait_ps}\r\n"
         f"echo replacing>> {log_q}\r\n"
         "set RETRY=0\r\n"
         ":retry_move_old\r\n"
@@ -440,7 +445,7 @@ def build_windows_helper_script(
         f"  echo failed> {failed_q}\r\n"
         "  goto relaunch\r\n"
         ")\r\n"
-        "timeout /t 1 /nobreak >NUL\r\n"
+        "ping -n 2 127.0.0.1 >NUL\r\n"
         "goto retry_move_old\r\n"
         ":moved_old\r\n"
         "set RETRY=0\r\n"
@@ -454,7 +459,7 @@ def build_windows_helper_script(
         f"  echo failed> {failed_q}\r\n"
         "  goto relaunch\r\n"
         ")\r\n"
-        "timeout /t 1 /nobreak >NUL\r\n"
+        "ping -n 2 127.0.0.1 >NUL\r\n"
         "goto retry_move_new\r\n"
         ":success\r\n"
         f"echo success>> {log_q}\r\n"
@@ -605,12 +610,26 @@ def apply_update(availability: UpdateAvailability) -> NoReturn:
     prepare_and_relaunch(dest)
 
 
+def _remove_stale_new_binary(exe_path: str | None = None) -> None:
+    path = new_binary_path(exe_path)
+    if not os.path.isfile(path):
+        return
+    try:
+        os.remove(path)
+        get_logger().info("update.stale_new_removed")
+    except OSError as exc:
+        get_logger().warning("update.stale_new_remove_failed reason=%s", type(exc).__name__)
+
+
 def try_startup_auto_update(*, current_version: str = APP_VERSION) -> None:
     """Au démarrage frozen : applique silencieusement si une version plus récente existe.
 
     Si un échec de remplacement précédent a laissé un marqueur, n'applique pas
     automatiquement (évite la boucle téléchargement → quit → pas d'UI) : l'app
     s'ouvre et le bouton de mise à jour reste disponible.
+
+    Un fichier ``.new`` orphelin (téléchargement d'une tentative précédente) n'est
+    jamais appliqué tel quel : on le purge si on est à jour, sinon on retélécharge.
     """
     if not is_frozen():
         return
@@ -620,13 +639,9 @@ def try_startup_auto_update(*, current_version: str = APP_VERSION) -> None:
             logger.warning("update.startup_skipped reason=recent_failure")
             return
 
-        existing_new = new_binary_path()
-        if os.path.isfile(existing_new):
-            logger.info("update.startup_retry_existing_new")
-            prepare_and_relaunch(existing_new)
-
         result = check_for_update(current_version=current_version)
         if result.status != "available" or result.availability is None:
+            _remove_stale_new_binary()
             return
         logger.info(
             "update.startup_found remote=%s current=%s",
