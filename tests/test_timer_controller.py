@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from time_tracker.timer_controller import TimerState, format_elapsed
@@ -46,6 +46,21 @@ class TestTimerState(unittest.TestCase):
         self.assertEqual(project, "P1")
         self.assertEqual(elapsed, 30.0)
         self.assertFalse(timer.tracking)
+
+    def test_begin_with_past_now_elapses_correctly(self) -> None:
+        timer = TimerState()
+        past = datetime.now() - timedelta(hours=2)
+        timer.begin("P1", now=past)
+        elapsed = timer.tick_elapsed()
+        self.assertGreaterEqual(elapsed, 2 * 3600 - 2)
+        self.assertLess(elapsed, 2 * 3600 + 5)
+
+    def test_begin_accepts_future_now(self) -> None:
+        """Validation « pas de futur » est côté UI, pas du contrôleur."""
+        timer = TimerState()
+        future = datetime.now() + timedelta(hours=1)
+        timer.begin("P1", now=future)
+        self.assertEqual(timer.start_time, future)
 
 
 if __name__ == "__main__":

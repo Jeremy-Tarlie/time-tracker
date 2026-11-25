@@ -36,6 +36,7 @@ from time_tracker.dialogs import (
     ManualSessionDialog,
     PeriodHistoryDialog,
     SettingsDialog,
+    StartAtDialog,
     TodayHistoryDialog,
     UpdatePromptDialog,
 )
@@ -48,6 +49,7 @@ from time_tracker.excel import (
 from time_tracker.hotkeys import (
     HOTKEY_ACTIONS,
     GlobalHotkeyController,
+    format_hotkey_display,
     hotkey_to_tk,
     parse_hotkeys,
 )
@@ -94,13 +96,15 @@ logger = get_logger()
 
 _PENDING_RETRY_MS = 15_000
 _GEOMETRY_DEBOUNCE_MS = 400
+_MIN_WIDTH = 300
+_TIMER_FONT_SIZE = 32
 
 
 class TimeTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Time Tracker")
-        self.root.minsize(320, 560)
+        self.root.minsize(_MIN_WIDTH, 560)
         self.root.resizable(True, True)
         self._theme: Theme = THEME
         apply_window(self.root, self._theme)
@@ -133,6 +137,8 @@ class TimeTrackerApp:
         self._manage_btn: tk.Button | None = None
         self._pause_btn: tk.Button | None = None
         self._retry_btn: tk.Button | None = None
+        self._manual_link: tk.Button | None = None
+        self._start_at_btn: tk.Button | None = None
         self._sessions_divider: tk.Frame | None = None
         self._status_dot: tk.Label | None = None
         self._status_wrap: tk.Frame | None = None
@@ -249,7 +255,7 @@ class TimeTrackerApp:
         self.root.update_idletasks()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        width = max(320, min(width, sw))
+        width = max(_MIN_WIDTH, min(width, sw))
         # 280 = minsize mode compact ; le mode étendu applique minsize 560 à part.
         height = max(280, min(height, sh))
         x = max(0, min(x, max(0, sw - width)))
@@ -267,7 +273,7 @@ class TimeTrackerApp:
             default_h = max(280, int(self.root.winfo_reqheight()))
         else:
             default_h = 560
-        self.root.geometry(f"320x{default_h}")
+        self.root.geometry(f"{_MIN_WIDTH}x{default_h}")
         self._default_corner_geometry()
 
     def _capture_geometry(self) -> None:
@@ -530,7 +536,7 @@ class TimeTrackerApp:
             text="00:00:00",
             bg=t.surface,
             fg=t.timer,
-            font=font_mono(40, bold=True),
+            font=font_mono(_TIMER_FONT_SIZE, bold=True),
         )
         self.timer_label.pack()
 
@@ -588,6 +594,32 @@ class TimeTrackerApp:
         self.stop_btn.configure(state="disabled")
         self.stop_btn.pack(side="left", fill="x", expand=True)
 
+        self._start_at_btn = make_button(
+            body,
+            "Démarrer à…",
+            self._start_at,
+            variant="link",
+            font_size=9,
+            bold=False,
+            padx=0,
+            pady=3,
+        )
+        self._start_at_btn.configure(fg=t.accent, activeforeground=t.accent_dim)
+        self._start_at_btn.pack(fill="x", anchor="w", pady=(8, 0))
+
+        self._manual_link = make_button(
+            body,
+            self._manual_link_text(),
+            self._open_manual,
+            variant="link",
+            font_size=9,
+            bold=False,
+            padx=0,
+            pady=3,
+        )
+        self._manual_link.configure(fg=t.accent, activeforeground=t.accent_dim)
+        self._manual_link.pack(fill="x", anchor="w", pady=(4, 0))
+
         self._retry_btn = make_button(
             body,
             "Réessayer l'enregistrement",
@@ -637,7 +669,6 @@ class TimeTrackerApp:
 
         action_link(primary_actions, "Aujourd'hui", self._open_today)
         action_link(primary_actions, "Période…", self._open_period)
-        action_link(primary_actions, "Saisie manuelle…", self._open_manual)
 
         section_label(self._details_frame, "Excel").pack(anchor="w", pady=(4, 6))
         secondary = tk.Frame(self._details_frame, bg=t.bg)
@@ -706,7 +737,7 @@ class TimeTrackerApp:
                 self._top_row.pack_forget()
             if self._details_frame is not None:
                 self._details_frame.pack_forget()
-            self.root.minsize(320, 280)
+            self.root.minsize(_MIN_WIDTH, 280)
         else:
             if self._top_row is not None and self.project_picker is not None:
                 if not bool(self._top_row.winfo_ismapped()):
@@ -714,7 +745,7 @@ class TimeTrackerApp:
             if self._details_frame is not None and self._details_toggle is not None:
                 if not bool(self._details_frame.winfo_ismapped()):
                     self._details_frame.pack(fill="x", after=self._details_toggle)
-            self.root.minsize(320, 560)
+            self.root.minsize(_MIN_WIDTH, 560)
 
         self._update_retry_button()
         if resize:
@@ -729,7 +760,7 @@ class TimeTrackerApp:
     def _fit_window_height(self, target_height: int) -> None:
         """Ajuste la hauteur en conservant largeur et position ; sync window_geometry."""
         self.root.update_idletasks()
-        width = max(320, self.root.winfo_width())
+        width = max(_MIN_WIDTH, self.root.winfo_width())
         current_h = self.root.winfo_height()
         if abs(current_h - target_height) < 8:
             return
@@ -756,6 +787,8 @@ class TimeTrackerApp:
         bg = self._GREEN if has_project else self._SUBTLE
         fg = self._ON_ACCENT if has_project else self._MUTED
         self.start_btn.config(state=state, bg=bg, fg=fg)
+        if self._start_at_btn is not None:
+            self._start_at_btn.config(state=state)
 
     def _set_project_controls_enabled(self, enabled: bool) -> None:
         self.project_picker.set_enabled(enabled)
@@ -782,6 +815,8 @@ class TimeTrackerApp:
         self.stop_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
         if self._pause_btn is not None:
             self._pause_btn.config(state="disabled", bg=self._SUBTLE, fg=self._MUTED)
+        if self._start_at_btn is not None:
+            self._start_at_btn.config(state="disabled")
         self._set_project_controls_enabled(False)
 
     def _set_tracking_controls(self) -> None:
@@ -803,6 +838,8 @@ class TimeTrackerApp:
                     fg=self._TEXT,
                     text="Pause",
                 )
+        if self._start_at_btn is not None:
+            self._start_at_btn.config(state="disabled")
         self._set_project_controls_enabled(False)
 
     def _format_elapsed(self, seconds: float) -> str:
@@ -870,6 +907,10 @@ class TimeTrackerApp:
         dialog.wait_window()
         return result["value"]
 
+    def _manual_link_text(self) -> str:
+        combo = format_hotkey_display(self.hotkeys["manual"])
+        return f"Saisie manuelle… ({combo})"
+
     def _start(self) -> None:
         if self.tracking or self._writing:
             return
@@ -881,13 +922,35 @@ class TimeTrackerApp:
                 parent=self.root,
             )
             return
-        tick_gen = self._timer.begin(project)
+        self._begin_tracking(project, start_at=None)
+
+    def _start_at(self) -> None:
+        if self.tracking or self._writing:
+            return
+        project = self.selected_project.get().strip()
+        if project not in project_names(self.projects):
+            messagebox.showwarning(
+                "Projet manquant",
+                "Sélectionnez un projet valide dans la liste.",
+                parent=self.root,
+            )
+            return
+        StartAtDialog(
+            self.root,
+            lambda start_at: self._begin_tracking(project, start_at=start_at),
+        )
+
+    def _begin_tracking(self, project: str, *, start_at: datetime | None) -> None:
+        if self.tracking or self._writing:
+            return
+        tick_gen = self._timer.begin(project, now=start_at)
         touch_project_last_used(self.projects, project)
         self._save_config()
         self._refresh_project_list()
         self._set_tracking_controls()
         self._set_status(f"En cours — {project}", kind="running")
         self._persist_active()
+        self.timer_label.config(text=self._format_elapsed(self._timer.tick_elapsed()))
         threading.Thread(target=self._tick, args=(tick_gen,), daemon=True).start()
         logger.info("Session démarrée")
 
@@ -1480,6 +1543,8 @@ class TimeTrackerApp:
         self.launch_at_startup = launch_at_startup
         self.always_on_top = always_on_top
         self.hotkeys = parse_hotkeys(hotkeys)
+        if self._manual_link is not None:
+            self._manual_link.configure(text=self._manual_link_text())
         self._apply_topmost()
         self._save_config()
         if startup_available():

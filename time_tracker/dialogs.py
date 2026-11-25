@@ -62,6 +62,32 @@ from time_tracker.widgets import SearchableDropdown
 
 _ALL_PROJECTS = "Tous"
 _DATE_FMT = "%d/%m/%Y"
+DATETIME_INPUT_FORMAT = "%d-%m-%Y %H:%M:%S"
+DATETIME_INPUT_LABEL = "JJ-MM-AAAA HH:MM:SS"
+
+
+def parse_datetime_input(text: str) -> datetime:
+    """Parse une saisie datetime au format DATETIME_INPUT_FORMAT.
+
+    Lève ValueError si le format est invalide (message géré par l'appelant).
+    """
+    return datetime.strptime(text.strip(), DATETIME_INPUT_FORMAT)
+
+
+class FutureStartError(ValueError):
+    """Heure de début dans le futur."""
+
+
+def parse_start_at_input(text: str, *, now: datetime | None = None) -> datetime:
+    """Parse un début de session et refuse une valeur dans le futur.
+
+    Lève ValueError (format) ou FutureStartError (futur).
+    """
+    start_at = parse_datetime_input(text)
+    moment = now or datetime.now()
+    if start_at > moment:
+        raise FutureStartError("start in the future")
+    return start_at
 
 
 class SegmentedPresets(tk.Frame):
@@ -966,8 +992,8 @@ class EditSessionDialog(tk.Toplevel):
         except ValueError:
             start_dt = datetime.now().replace(second=0, microsecond=0)
             end_dt = start_dt + timedelta(hours=1)
-        self._start_var = tk.StringVar(value=start_dt.strftime("%Y-%m-%d %H:%M"))
-        self._end_var = tk.StringVar(value=end_dt.strftime("%Y-%m-%d %H:%M"))
+        self._start_var = tk.StringVar(value=start_dt.strftime(DATETIME_INPUT_FORMAT))
+        self._end_var = tk.StringVar(value=end_dt.strftime(DATETIME_INPUT_FORMAT))
         self._notes_var = tk.StringVar(value=session["notes"])
         self.title("Modifier la session")
         apply_window(self)
@@ -991,8 +1017,8 @@ class EditSessionDialog(tk.Toplevel):
         self._picker.set_options(names)
         self._picker.pack(fill="x", pady=(0, 8))
         for label, var in (
-            ("Début (AAAA-MM-JJ HH:MM)", self._start_var),
-            ("Fin (AAAA-MM-JJ HH:MM)", self._end_var),
+            (f"Début ({DATETIME_INPUT_LABEL})", self._start_var),
+            (f"Fin ({DATETIME_INPUT_LABEL})", self._end_var),
             ("Notes", self._notes_var),
         ):
             tk.Label(body, text=label, bg=t.bg, fg=t.muted, font=font_ui(8, bold=True)).pack(
@@ -1022,12 +1048,12 @@ class EditSessionDialog(tk.Toplevel):
             messagebox.showwarning("Projet", "Sélectionnez un projet valide.", parent=self)
             return
         try:
-            start = datetime.strptime(self._start_var.get().strip(), "%Y-%m-%d %H:%M")
-            end = datetime.strptime(self._end_var.get().strip(), "%Y-%m-%d %H:%M")
+            start = parse_datetime_input(self._start_var.get())
+            end = parse_datetime_input(self._end_var.get())
         except ValueError:
             messagebox.showwarning(
                 "Format",
-                "Utilisez le format AAAA-MM-JJ HH:MM pour début et fin.",
+                f"Utilisez le format {DATETIME_INPUT_LABEL} pour début et fin.",
                 parent=self,
             )
             return
@@ -1434,8 +1460,8 @@ class ManualSessionDialog(tk.Toplevel):
         self._project = tk.StringVar(value=names[0] if names else "")
         now = datetime.now().replace(second=0, microsecond=0)
         start = now - timedelta(hours=1)
-        self._start_var = tk.StringVar(value=start.strftime("%Y-%m-%d %H:%M"))
-        self._end_var = tk.StringVar(value=now.strftime("%Y-%m-%d %H:%M"))
+        self._start_var = tk.StringVar(value=start.strftime(DATETIME_INPUT_FORMAT))
+        self._end_var = tk.StringVar(value=now.strftime(DATETIME_INPUT_FORMAT))
         self._notes_var = tk.StringVar()
         self.title("Saisie manuelle")
         apply_window(self)
@@ -1459,8 +1485,8 @@ class ManualSessionDialog(tk.Toplevel):
         self._picker.set_options(names)
         self._picker.pack(fill="x", pady=(0, 8))
         for label, var in (
-            ("Début (AAAA-MM-JJ HH:MM)", self._start_var),
-            ("Fin (AAAA-MM-JJ HH:MM)", self._end_var),
+            (f"Début ({DATETIME_INPUT_LABEL})", self._start_var),
+            (f"Fin ({DATETIME_INPUT_LABEL})", self._end_var),
             ("Notes", self._notes_var),
         ):
             tk.Label(body, text=label, bg=t.bg, fg=t.muted, font=font_ui(8, bold=True)).pack(
@@ -1490,12 +1516,12 @@ class ManualSessionDialog(tk.Toplevel):
             messagebox.showwarning("Projet", "Sélectionnez un projet valide.", parent=self)
             return
         try:
-            start = datetime.strptime(self._start_var.get().strip(), "%Y-%m-%d %H:%M")
-            end = datetime.strptime(self._end_var.get().strip(), "%Y-%m-%d %H:%M")
+            start = parse_datetime_input(self._start_var.get())
+            end = parse_datetime_input(self._end_var.get())
         except ValueError:
             messagebox.showwarning(
                 "Format",
-                "Utilisez le format AAAA-MM-JJ HH:MM pour début et fin.",
+                f"Utilisez le format {DATETIME_INPUT_LABEL} pour début et fin.",
                 parent=self,
             )
             return
@@ -1503,4 +1529,71 @@ class ManualSessionDialog(tk.Toplevel):
             messagebox.showwarning("Horaires", "La fin doit être après le début.", parent=self)
             return
         self._on_submit(project, start, end, self._notes_var.get().strip())
+        self.destroy()
+
+
+class StartAtDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        on_submit: Callable[[datetime], None],
+    ) -> None:
+        super().__init__(parent)
+        self._on_submit = on_submit
+        now = datetime.now().replace(microsecond=0)
+        self._start_var = tk.StringVar(value=now.strftime(DATETIME_INPUT_FORMAT))
+        self.title("Démarrer à…")
+        apply_window(self)
+        self.resizable(False, False)
+        self.grab_set()
+        t = THEME
+        dialog_header(self, "Démarrer à…")
+        body = tk.Frame(self, bg=t.bg, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(
+            body,
+            text=f"Début ({DATETIME_INPUT_LABEL})",
+            bg=t.bg,
+            fg=t.muted,
+            font=font_ui(8, bold=True),
+        ).pack(anchor="w")
+        entry = tk.Entry(body, textvariable=self._start_var, font=font_ui(10))
+        style_entry(entry)
+        entry.pack(fill="x", pady=(2, 10), ipady=4)
+        entry.focus_set()
+        btn_row = tk.Frame(body, bg=t.bg)
+        btn_row.pack(fill="x")
+        make_button(
+            btn_row,
+            "Annuler",
+            self.destroy,
+            variant="subtle",
+            font_size=9,
+            bold=False,
+        ).pack(side="right", padx=(6, 0))
+        make_button(btn_row, "Démarrer", self._submit, variant="primary", font_size=9).pack(
+            side="right",
+        )
+        entry.bind("<Return>", lambda _event: self._submit())
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.geometry("360x180")
+
+    def _submit(self) -> None:
+        try:
+            start_at = parse_start_at_input(self._start_var.get())
+        except FutureStartError:
+            messagebox.showwarning(
+                "Début invalide",
+                "L'heure de début ne peut pas être dans le futur.",
+                parent=self,
+            )
+            return
+        except ValueError:
+            messagebox.showwarning(
+                "Format",
+                f"Utilisez le format {DATETIME_INPUT_LABEL}.",
+                parent=self,
+            )
+            return
+        self._on_submit(start_at)
         self.destroy()
