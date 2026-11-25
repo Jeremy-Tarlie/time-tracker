@@ -870,6 +870,19 @@ class AboutDialog(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             body,
+            text=(
+                "Crédits\n"
+                "Développé pour le suivi du temps par projet.\n"
+                "Merci d'utiliser Time Tracker."
+            ),
+            bg=t.bg,
+            fg=t.muted,
+            font=font_ui(8),
+            justify="left",
+            wraplength=360,
+        ).pack(anchor="w", pady=(10, 0))
+        tk.Label(
+            body,
             text=f"Dossier données :\n{APP_DIR}",
             bg=t.bg,
             fg=t.muted,
@@ -904,7 +917,7 @@ class AboutDialog(tk.Toplevel):
             font_size=9,
             bold=False,
         ).pack(anchor="e", pady=(16, 0))
-        self.geometry("420x420")
+        self.geometry("420x460")
 
 
 class UpdatePromptDialog(tk.Toplevel):
